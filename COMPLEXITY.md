@@ -26,8 +26,62 @@ Measures complexity differently than cyclomatic: nesting multiplies the incremen
 java -jar gslint.jar complexity src --init-src-root src --metric cognitive
 ```
 
+## Ranking Functions by Complexity (`--limit N`)
+
+When analyzing an entire project or folder, use `--limit N` to see the **top N most complex functions ranked across all scanned files**. This is useful for identifying hotspots and prioritizing refactoring efforts.
+
+```bash
+# Show the top 10 most complex functions (cyclomatic) across the entire src/ tree
+java -jar gslint.jar complexity --pattern "src/**/*.gs" --init-src-root src --metric cyclomatic --limit 10
+
+# Show the top 5 most complex functions (cognitive) in JSON format
+java -jar gslint.jar complexity --pattern "src/**/*.gs" --init-src-root src --metric cognitive --limit 5 --format json
+
+# Combine with --min-score to filter before ranking (excludes functions below the threshold)
+java -jar gslint.jar complexity --pattern "src/**/*.gs" --init-src-root src --metric cyclomatic --limit 20 --min-score 8
+```
+
+**Output (text format):**
+```
+-- Top 10 Cyclomatic Complexity across 25 files --
+
+  Rank  Score  File                       Function
+  ──────────────────────────────────────────────────────────────
+     1     24  OrderService.gs            processOrder(Order,User)@142
+     2     19  PaymentProcessor.gs        executePayment(Payment)@87
+     3     15  ReportGenerator.gs         buildReport(String)@33
+     ...
+```
+
+**Notes:**
+- `--limit` and `--explain` are mutually exclusive (pick one)
+- `--min-score` filters functions before ranking (only counted functions >= score)
+- `--limit 0` (default) disables ranking and shows per-file results
+
+<!-- BEGIN:cyclomatic -->
 <details>
-<summary>complexity examples</summary>
+<summary>cyclomatic complexity examples</summary>
+
+Calculates cyclomatic complexity for every function in a Gosu source file.
+
+Cyclomatic complexity starts at 1 per function and increments by 1 for each decision
+point: `if`, `while`, `do-while`, `for`/`foreach`,
+`case` clause, `catch` clause, ternary (`?:`), `&&`, and `||`.
+
+Lambda/block expressions (`IBlockExpression`) are
+handled according to the `includeLambdaComplexity` flag passed to the constructor:
+
+  - `true` - decision points inside lambdas are counted and added to the
+      enclosing function's total (used by the `complexity` CLI command).
+  - `false` - lambda bodies are not descended into; only the lambda count is
+      tracked (used by the `complexity-no-lambdas` variant).
+
+Results are returned as a `ComplexityResults` containing one `Metrics`
+entry per function, keyed by a collision-safe string of the form
+`functionName(paramTypes)@lineNumber`.
+Inner classes are processed recursively; anonymous classes are skipped.
+
+### Examples
 
 ```gosu
 // FAIL: cyclomatic complexity = 6
@@ -55,23 +109,31 @@ function simpleFunction(x : int) : int {
 }
 ```
 
-```bash
-# Tighten the threshold
-java -jar gslint-all.jar src/ --rule-config complexity:maxComplexity=5
-```
-
 </details>
+<!-- END:cyclomatic -->
 
+<!-- BEGIN:cognitive -->
 <details>
-<summary>cognitive-complexity examples</summary>
+<summary>cognitive complexity examples</summary>
+
+Calculates SonarSource-style Cognitive Complexity for each member function in a Gosu class.
+
+Based on the
+SonarSource Cognitive Complexity specification.
+
+When `includeLambdaComplexity` is true, complexity inside lambda/block expressions
+is included and lambdas act as nesting contributors (B2). When false, lambda subtrees are
+skipped entirely.
+
+### Examples
 
 ```gosu
 // FAIL: nesting multiplies cost
 function deeplyNested(x : int, y : int) : int {
   var total = 0
   if (x > 0) {                         // +1
-    while (y > 0) {                    // +1 (nesting=1) = +2
-      if (y % 2 == 0) {               // +1 (nesting=2) = +3
+    while (y > 0) {                    // +2 (nesting=1)
+      if (y % 2 == 0) {               // +3 (nesting=2)
         total += 10
       }
       y--
@@ -88,11 +150,8 @@ function flatConditions(a : int, b : int) : String {
 }
 ```
 
-```bash
-java -jar gslint.jar src/ --rule-config cognitive-complexity:maxComplexity=10
-```
-
 </details>
+<!-- END:cognitive -->
 
 ---
 
