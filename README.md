@@ -2,20 +2,17 @@
 
 Source-level static analysis for the [Gosu](https://gosu-lang.github.io/) programming language. Parses `.gs`, `.gsx`, `.gst`, and `.gsp` source files using the Gosu compiler's own AST API (`gw.lang.parser.*`) and reports violations in Text, JSON, SARIF.
 
-- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, **1.18.5**, 1.18.7
-- Gosu has been a stable language for the past 10+ years so there should be flexibility with running a linter built for **1.18.5** against files designed for a previous version
-- Java 11 is required to build (keeps parity with `gosu-core`); developed on IntelliJ 2024.1.5 to match IDE recommendation of popular Gosu application platforms
-- Verified on Java 17 with Gosu 1.17.13, **1.18.5**, 1.18.7
-- `gslint.jar` bundles `gosu-core`; also supports running without the bundled `gosu-core`
+- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, **1.18.5**, 1.18.7 
+- Gosu has been a stable language for over a decade so there should be flexibility with running a linter built for **1.18.5** against files designed for a previous version
+- Java 11 used to keep parity with `gosu-core`; developed on IntelliJ 2024.1.5 to match IDE recommendation of popular Gosu application platforms
+- Verified on Java 17 with Gosu 1.17.13, **1.18.5**, 1.18.7; glanced at upcoming changes in 1.20.0-SNAPSHOT for JDK 25
 
 > **Rule philosophy:** This project ships a curated set of language-level rules. It serves as a foundational component for larger code quality efforts and will not reach feature parity with general-purpose linters. If you're building a Gosu framework or application platform, write custom rules targeting your domain APIs.
 
 ## How It Works
 
-The linter depends directly on `gosu-core`. `GosuClassParser.parseFull()` produces a `IGosuClass` AST with fully resolved symbols; rules then walk that hierarchy.
-Some complex rules use Complex rules that require type information (e.g., `raw-type`, `identity-return`) can safely navigate the AST and inspect types without worrying about missing information or API instability.
-This project tries to use just the `gw.lang.*` interface hierarchy but occasional dips into `gw.internal.lang.*` which has been stable for many years.
-If `gosu-core` ever bumps the minimal Java version, the `gslint` will update to match it.
+The linter depends directly on `gosu-core`. `GosuClassParser.parseFull()` produces a `IGosuClass` AST then rules walk the hierarchy.
+This project focused on using the `gw.lang.*` interface hierarchy but occasional dips into `gw.internal.lang.*`. 
 
 ## ErrorType and Type Resolution
 
