@@ -76,9 +76,10 @@ handled according to the `includeLambdaComplexity` flag passed to the constructo
   - `false` - lambda bodies are not descended into; only the lambda count is
       tracked (used by the `complexity-no-lambdas` variant).
 
-Results are returned as a `ComplexityResults` containing one `Metrics`
-entry per function, keyed by a collision-safe string of the form
-`functionName(paramTypes)@lineNumber`.
+Results are returned as a `ComplexityResults` containing one `ComplexityMetrics`
+entry per function, keyed internally by a collision-safe string of the form
+`functionName(paramTypes)@lineNumber`. Display output strips this to just
+the function name via `displayName(key)`.
 Inner classes are processed recursively; anonymous classes are skipped.
 
 ### Examples
@@ -188,19 +189,19 @@ CyclomaticComplexityExample.gs · complexFunction(int, int)@30 · cyclomatic = 6
  30 │ function complexFunction(a : int, b : int) : int {
  31 │   var result = 0
  32 │
- 33 │   if (a > 0) {                                     ╌╌ +1   if                             [2]
+ 33 │   if (a > 0) {                                     // +1   if                             [2]
  34 │     result += a
- 35 │   } else if (b > 0) {                              ╌╌ +1   if                             [3]
+ 35 │   } else if (b > 0) {                              // +1   if                             [3]
  36 │     result += b
  37 │   }
  38 │
- 39 │   for (i in 1..10) {                               ╌╌ +1   foreach                        [4]
- 40 │     if (i % 2 == 0) {                              ╌╌ +1   if                             [5]
+ 39 │   for (i in 1..10) {                               // +1   foreach                        [4]
+ 40 │     if (i % 2 == 0) {                              // +1   if                             [5]
  41 │       result += i
  42 │     }
  43 │   }
  44 │
- 45 │   while (result < 100) {                           ╌╌ +1   while                          [6]
+ 45 │   while (result < 100) {                           // +1   while                          [6]
  46 │     result += 10
  47 │   }
  48 │
@@ -216,15 +217,15 @@ CognitiveComplexityExample.gs · example · cognitive = 13
  10 │ function example(x : int, y : int) : int {
  11 │   var total = 0
  12 │
- 14 │   if (x > 0) {                                     ╌╌ +1   if                             [2]
- 16 │   } else if (x < 0) {                              ╌╌ +1   else-if                        [3]
- 19 │   } else {                                         ╌╌ +1   else                           [4]
- 25 │   while (y > 0) {                                  ╌╌ +1   while                          [5]
- 27 │     if (y % 2 == 0) {                              ╌╌ +2   if (nesting=1)                 [7]
- 34 │   total += (x == 1 ? 1 : 2)                        ╌╌ +1   ternary                        [8]
- 37 │   if ((x > 0 && y > 0 && total > 0) || (x == 0)) { ╌╌ +3   if; &&; ||                    [11]
- 43 │     if (x == 99) {                                 ╌╌ +1   if                             [12]
- 46 │   } catch (e : RuntimeException) {                 ╌╌ +1   catch                          [13]
+ 14 │   if (x > 0) {                                     // +1   if                             [2]
+ 16 │   } else if (x < 0) {                              // +1   else-if                        [3]
+ 19 │   } else {                                         // +1   else                           [4]
+ 25 │   while (y > 0) {                                  // +1   while                          [5]
+ 27 │     if (y % 2 == 0) {                              // +2   if (nesting=1)                 [7]
+ 34 │   total += (x == 1 ? 1 : 2)                        // +1   ternary                        [8]
+ 37 │   if ((x > 0 && y > 0 && total > 0) || (x == 0)) { // +3   if; &&; ||                    [11]
+ 43 │     if (x == 99) {                                 // +1   if                             [12]
+ 46 │   } catch (e : RuntimeException) {                 // +1   catch                          [13]
  58 │   return total
  59 │ }
 ```
