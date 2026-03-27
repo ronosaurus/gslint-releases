@@ -2,17 +2,16 @@
 
 Source-level static analysis for the [Gosu](https://gosu-lang.github.io/) programming language. Parses `.gs`, `.gsx`, `.gst`, and `.gsp` source files using the Gosu compiler's own AST API (`gw.lang.parser.*`) and reports violations in Text, JSON, SARIF.
 
-- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, **1.18.5**, 1.18.7 
+- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, **1.18.5**, 1.18.7
 - Gosu has been a stable language for over a decade so there should be flexibility with running a linter built for **1.18.5** against files designed for a previous version
-- Java 11 used to keep parity with `gosu-core`; developed on IntelliJ 2024.1.5 to match IDE recommendation of popular Gosu application platforms
-- Verified on Java 17 with Gosu 1.17.13, **1.18.5**, 1.18.7; glanced at upcoming changes in 1.20.0-SNAPSHOT for JDK 25
+- Java 11 used to keep parity with `gosu-core`; verified on Java 17 with Gosu 1.17.13, **1.18.5**, 1.18.7; glanced at upcoming changes in 1.20.0-SNAPSHOT for JDK 25
 
 > **Rule philosophy:** This project ships a curated set of language-level rules. It serves as a foundational component for larger code quality efforts and will not reach feature parity with general-purpose linters. If you're building a Gosu framework or application platform, write custom rules targeting your domain APIs.
 
 ## How It Works
 
-The linter depends directly on `gosu-core`. `GosuClassParser.parseFull()` produces a `IGosuClass` AST then rules walk the hierarchy.
-This project focused on using the `gw.lang.*` interface hierarchy but occasional dips into `gw.internal.lang.*`. 
+The linter depends directly on `gosu-core`: `GosuClassParser.parseFull()` produces an `IGosuClass` AST that rules walk.
+The focus is on the public `gw.lang.*` interface hierarchy, with occasional dips into `gw.internal.lang.*`.
 
 ## ErrorType and Type Resolution
 
@@ -91,7 +90,7 @@ Individual violations are flagged with `[⚠ type-incomplete]` in text output an
 
 ## Rule Reference
 
-See [RULES.md](RULES.md) for a comprehensive reference of all 70+ linting rules. For complexity metrics (cyclomatic and cognitive complexity), see [COMPLEXITY.md](COMPLEXITY.md).
+See [RULES.md](RULES.md) for a comprehensive reference of all 85+ linting rules. For complexity metrics (cyclomatic and cognitive complexity), see [COMPLEXITY.md](COMPLEXITY.md).
 
 ## Command-Line Usage
 
@@ -117,10 +116,10 @@ Use **forward slashes** (`/`) in all patterns. They work identically on Windows,
 
 ```bash
 # Recommended - portable everywhere
-java -jar gslint.jar "src/**/*.gs" --init-src-root src
+java -jar gslint.jar --include "src/**/*.gs" --init-src-root src
 
 # Also accepted on Windows, but not portable to Unix CI and not religiously tested
-java -jar gslint.jar "src\**\*.gs" --init-src-root src
+java -jar gslint.jar --include "src\**\*.gs" --init-src-root src
 ```
 
 ### Running without the uber JAR
@@ -360,4 +359,3 @@ java -cp "gslint.jar:/lib/gosu-core-1.18.5.jar:gosu-core-api-1.18.5.jar:<other j
 ## Notes
 
 - Portions of this project were generated with the assistance of coding agents
-- 
