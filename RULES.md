@@ -2,7 +2,7 @@
 
 > **Rule philosophy:** This project ships a curated set of language-level rules that work across any Gosu codebase. It serves as a foundational component for larger code quality efforts and will not reach feature parity with general-purpose linters. If you're building a Gosu framework or application platform, write custom rules targeting your domain APIs.
 
-70+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
+85+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
 
 <!-- BEGIN:rules -->
 ### dataflow
@@ -13,7 +13,7 @@
 | `dead-assignment` | Flags variables assigned but never read before being overwritten or going out of scope. |
 | `identity-return` | Flags functions that perform work but return their input parameter unchanged. |
 | `null-return` | Flags functions that return `null` directly; prefer `Optional` or an empty collection. |
-| `unused-constructor-params` | Flags constructor parameters that are never read. |
+| `unused-ctor-params` | Flags constructor parameters that are never read. |
 
 <details>
 <summary>ctor-delegation-param examples</summary>
@@ -35,28 +35,25 @@ construct(target : Location, askForConfirmation : boolean) {
 }
 ```
 
-**Scope:** This rule only checks that parameters appear in the delegation
-arguments. It does NOT verify whether unforgotten parameters are used elsewhere
-in the constructor body (e.g., assigned to fields, logged, transformed, etc.).
+**Scope:** This rule checks that parameters either appear in the delegation
+arguments OR are referenced elsewhere in the constructor body (e.g., assigned to
+fields, logged, transformed). A parameter used in the body is not a forgotten
+forwarding - it is intentionally consumed by the delegating constructor.
 
-Example that WILL be flagged (parameter not in delegation AND not used):
+Example that WILL be flagged (parameter not in delegation AND not used in body):
 ```gosu
 construct(foo : Foo) {
-  this(Widget.DEFAULT)  // foo received but never used
+  this(Widget.DEFAULT)  // foo received but never used - likely a copy-paste bug
 }
 ```
 
-Example that WILL ALSO be flagged (parameter not in delegation, but IS used locally):
+Example that will NOT be flagged (parameter not in delegation, but IS used in body):
 ```gosu
 construct(foo : Foo) {
-  _foo = foo             // parameter IS used, but...
-  this(Widget.DEFAULT)   // ...NOT forwarded to this(...)
+  this()               // delegates to no-arg overload for base init
+  _foo = foo           // parameter consumed here - intentional
 }
 ```
-
-**Future enhancement:** A configurable or separate rule could check whether
-unforgotten parameters are actually used (assigned to fields, passed to methods,
-etc.), reducing false positives for intentional parameter transformations.
 
 **Note:** This rule only checks `this(...)` delegation calls,
 not `super(...)`, since parent constructors may have different signatures.
@@ -183,7 +180,7 @@ function findFirst() : String {
 
 </details>
 <details>
-<summary>unused-constructor-params examples</summary>
+<summary>unused-ctor-params examples</summary>
 
 Detects constructor parameters that are never assigned or used within the
 constructor body.
@@ -216,13 +213,14 @@ construct(name : String, value : int) {
 |-------|---------|
 | `delegate-member-conflict` | Flags class methods that shadow delegate-synthesized forwarding methods. |
 | `duplicate-delegate` | Flags multiple delegate fields that represent the same interface. |
-| `forbidden-imports` | Flags usage of types from forbidden packages (supports wildcards like 'sun.*'). Requires 'packages' config key. *(disabled by default - activate with `--rules forbidden-imports`)* |
+| `forbidden-imports` | Flags uses statements that import types from forbidden packages (supports wildcards like 'sun.*'). Requires 'packages' config key. *(disabled by default - activate with `--rules forbidden-imports`)* |
 | `logger-static` | Flags logger fields that are not static (should be shared across instances). |
+| `prefer-stringbuilder` | Flags StringBuffer usage; prefer StringBuilder which avoids unnecessary synchronization in single-threaded code. |
 | `public-field` | Flags public instance fields; prefer private fields with public getter/setter. |
 | `raw-type` | Flags use of raw generic types without type parameters (e.g., `List` instead of `List<T>`). |
-| `stringbuffer-char-constructor` | Flags `StringBuffer`/`StringBuilder` initialized with a `char` (uses ASCII value, not char). |
+| `strbuf-char-ctor` | Flags `StringBuffer`/`StringBuilder` initialized with a `char` (uses ASCII value, not char). |
 | `threadlocal-static` | Flags `ThreadLocal` fields that are not static (should be shared, not per-instance). |
-| `too-many-args` | Flags functions with more than the configured number of parameters (default: 6). |
+| `too-many-args` | Flags functions with more than the configured number of parameters (default: 5). |
 
 <details>
 <summary>delegate-member-conflict examples</summary>
@@ -273,6 +271,53 @@ delegate _b represents IBar   // distinct interfaces - OK
 ```
 
 Token: `duplicate-delegate`
+
+</details>
+<details>
+<summary>prefer-stringbuilder examples</summary>
+
+Flags use of `StringBuffer` and recommends `StringBuilder` instead.
+
+`StringBuffer` synchronizes every method on the instance monitor, which adds
+overhead that is wasted in the overwhelmingly common case where the buffer is not
+shared across threads. `StringBuilder` has an identical API but no
+synchronization, making it faster in single-threaded code.
+
+Only flag `StringBuffer` - not `StringBuilder` - since StringBuilder
+is already the preferred type.
+
+### Detection strategy
+
+  - **Class-level fields** (via `.processVariable`): any field declared
+      with type `StringBuffer`.
+  - **Local variables** (within function/constructor bodies): any `var`
+      statement whose declared or inferred type is `StringBuffer`.
+  - **Standalone construction**: any `new StringBuffer(...)` expression
+      whose line is not already covered by a local variable declaration above
+      - catches `return new StringBuffer()` and argument-position usages without
+      double-reporting lines like `var buf : StringBuffer = new StringBuffer()`.
+
+### Flagged
+```gosu
+private var _buf : StringBuffer             // class field
+var buf : StringBuffer = new StringBuffer() // local variable declaration
+return new StringBuffer()                   // return without assignment
+method(new StringBuffer())                  // argument without assignment
+```
+
+### Not flagged
+```gosu
+new StringBuilder()
+var sb = new StringBuilder()
+```
+
+### Historical note - Matcher.appendReplacement / appendTail
+
+In Java 8, `java.util.regex.Matcher.appendReplacement(StringBuffer, String)` and
+`appendTail(StringBuffer)` only accepted `StringBuffer`, making it the only
+context where `StringBuffer` was effectively required. Java 9 added `StringBuilder`
+overloads for both methods. Since this project targets Java 11, no such forced use case
+exists and the rule can safely flag all `StringBuffer` usage.
 
 </details>
 <details>
@@ -344,7 +389,7 @@ Instead:
 
 </details>
 <details>
-<summary>stringbuffer-char-constructor examples</summary>
+<summary>strbuf-char-ctor examples</summary>
 
 Detects `new StringBuffer(char)` and `new StringBuilder(char)` constructions.
 
@@ -581,6 +626,7 @@ CLI token: `expansion-void-call`
 
 | Token | Detects |
 |-------|---------|
+| `blank-line-before-else` | Flags else/else-if clauses separated from the closing '}' by a blank line. |
 | `complex-boolean` | Flags boolean expressions with too many operators (default threshold: 3). |
 | `duplicate-condition` | Flags `if`/`else-if` chains where the same condition appears more than once. |
 | `logical-and-style` | Flags inconsistent spacing or style around logical AND (`&&`) operators. |
@@ -591,6 +637,62 @@ CLI token: `expansion-void-call`
 | `too-many-returns` | Flags functions with more than the configured number of `return` statements (default: 5). |
 | `while-literal-condition` | Flags while(true) (infinite loop) and while(false) (dead code) loop conditions. |
 
+<details>
+<summary>blank-line-before-else examples</summary>
+
+Flags an `else` or `else if` clause that is separated from the closing
+{@code }} of its `if` body by one or more blank lines.
+
+A blank line between {@code }} and `else` visually disconnects the two
+halves of the conditional and suggests they are unrelated, making the code harder
+to follow. The `else` should either share the same line as the closing brace
+(K&amp;R style) or appear on the very next line (Allman style):
+
+### Flagged
+```gosu
+if (cond) {
+  doA()
+}
+                 // ← blank line: VIOLATION
+else {
+  doB()
+}
+```
+
+### Not flagged
+```gosu
+if (cond) { doA() } else { doB() }   // K&R same-line - OK
+
+if (cond) {
+  doA()
+}
+else {                               // Allman next-line - OK
+  doB()
+}
+
+if (cond) {
+  doA()
+} else if (other) {                  // K&R else-if - OK
+  doC()
+}
+```
+
+### Detection
+
+Rather than relying on AST line numbers to find the closing {@code }} of the
+then-branch (which can misfire on compound statements like `try`), the rule
+scans the source backwards from the `else` keyword. It walks through
+blank lines until it hits the first non-blank line. If that line starts with
+{@code }}, the blank lines are between the closing brace and the `else` - a
+violation. If the first non-blank line is anything other than {@code }} (code,
+comments, etc.), the blank lines are inside the then-body, not between
+the brace and the `else`, so no violation is reported.
+
+This approach handles all brace styles (K&amp;R, Allman) and all then-body
+shapes (single-statement, multi-statement, deeply nested compound statements)
+without depending on `IStatementList.getLastLine()` accuracy.
+
+</details>
 <details>
 <summary>duplicate-condition examples</summary>
 
@@ -707,6 +809,7 @@ while (!queue.empty()) { // OK: computed condition
 | `bitshift` | Flags bitshift operators (`<<`, `>>`, `>>>`) that are usually mistakes in business logic. |
 | `bitwise-operator` | Flags bitwise operators (`|`, `&`, `~`) that may be confused with logical operators. |
 | `concurrenthashmap-contains` | Flags unsafe use of `.contains()` instead of `.containsKey()` on ConcurrentHashMaps. |
+| `consecutive-log-calls` | Flags runs of 2+ consecutive same-level log calls on the same logger that should be merged into one. |
 | `date-time-format` | Flags incorrect date/time format patterns (e.g., `mm` instead of `MM` for months). |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
 | `explicit-gc` | Flags System.gc() and Runtime.getRuntime().gc() calls (the JVM should manage GC; explicit calls cause unpredictable pauses). |
@@ -716,10 +819,13 @@ while (!queue.empty()) { // OK: computed condition
 | `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..|). |
 | `malformed-string-interpolation` | Flags string interpolation with mismatched or incorrect syntax. |
 | `map-returns-collection` | Flags `map()` operations that return nested collections that could be flattened with `flatMap()`. |
+| `process-spawn` | Flags Runtime.exec() and new ProcessBuilder(...) calls (OS process spawning is fragile and a source of command-injection vulnerabilities). |
 | `redundant-size-check` | Flags redundant size comparisons that are always true or always false. |
+| `reflection-use` | Flags Java java.lang.reflect.* calls and Gosu TypeSystem.* calls that bypass compile-time type safety. |
+| `regex-bad-pattern` | Flags regex patterns with ReDoS risk, invalid character ranges, or trivially broad wildcards. |
+| `regex-compile-in-loop` | Flags Pattern.compile() and implicit regex compilation (matches/replaceAll/replaceFirst) inside loops. |
 | `string-literal-arg` | Flags raw string literals passed as arguments to configured method names. Requires 'methods' config key. *(disabled by default - activate with `--rules string-literal-arg`)* |
 | `synchronized-method` | Flags `synchronized` method modifiers; prefer explicit lock objects. |
-| `process-spawn` | Flags `Runtime.exec()` and `new ProcessBuilder(...)` calls (OS process spawning is fragile and a command-injection risk). |
 | `system-exit` | Flags `System.exit()` calls (usually a mistake in library code). |
 | `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--rules thread-primitives`)* |
 | `thread-sleep` | Flags `Thread.sleep()` calls (usually a mistake; use events or futures instead). |
@@ -754,6 +860,45 @@ new BigDecimal(42)        // no named constant for 42
 new BigDecimal("3.14")    // no named constant for 3.14
 new BigDecimal(someVar)   // not a literal
 BigDecimal.ZERO           // already using the constant
+```
+
+</details>
+<details>
+<summary>consecutive-log-calls examples</summary>
+
+Detects consecutive log calls at the same level on the same logger that should be merged
+into a single call.
+
+Each log statement - even a simple string literal - independently triggers timestamp
+capture, level-threshold evaluation, and log-record allocation. Two consecutive
+`LOG.debug("Hello")` / `LOG.debug("World")` calls pay that overhead twice;
+merging them into `LOG.debug("Hello World")` (or a multi-line format string) halves it.
+
+All six standard log levels are covered: `trace`, `debug`, `info`,
+`warn`, `error`, and `fatal`.
+
+A "run" is broken by any of:
+
+  - A different log level (e.g. `debug` followed by `info`)
+  - A different logger variable (e.g. `LOG.debug` followed by `AUDIT_LOG.debug`)
+  - Any non-log statement between the calls
+
+### Flagged
+```gosu
+LOG.debug("Hello")   // VIOLATION: start of a 2-call run
+LOG.debug("World")
+```
+
+### Not flagged
+```gosu
+LOG.debug("only one")          // OK: single call, no run
+LOG.debug("step")
+LOG.info("done")               // OK: level change breaks run
+LOG1.debug("a")
+LOG2.debug("b")                // OK: different logger breaks run
+LOG.debug("before")
+doSomething()                  // OK: non-log statement breaks run
+LOG.debug("after")
 ```
 
 </details>
@@ -963,6 +1108,29 @@ Token: `map-returns-collection`
 
 </details>
 <details>
+<summary>process-spawn examples</summary>
+
+Detects code that spawns OS processes via `Runtime.exec()` or
+`new ProcessBuilder(...)`.
+
+Shelling out to OS processes is fragile (platform-specific paths, encoding
+differences, resource leaks if the process is not properly waited on) and a
+common source of command-injection vulnerabilities when command strings are
+assembled from user input.
+
+### Flagged
+```gosu
+Runtime.getRuntime().exec("ls -la")        // VIOLATION
+var pb = new ProcessBuilder("cmd", "/c", "dir")  // VIOLATION
+```
+
+### Not flagged
+```gosu
+myService.exec(query)   // unrelated exec() call on a non-Runtime type
+```
+
+</details>
+<details>
 <summary>redundant-size-check examples</summary>
 
 Detects redundant comparisons of collection.size() against non-negative bounds.
@@ -1005,6 +1173,87 @@ function example() {
   }
 }
 ```
+
+</details>
+<details>
+<summary>reflection-use examples</summary>
+
+Flags use of Java reflection (`java.lang.reflect.*`) and Gosu's
+`TypeSystem` API. Both mechanisms bypass compile-time type safety:
+they can't be verified at compile time, break silently when class/method
+names change, and carry a measurable runtime overhead.
+
+### What is flagged by default
+
+  - **Java Class introspection:** `Class.forName(...)`,
+      `.getMethod(...)`, `.getDeclaredField(...)`,
+      `.getConstructor(...)`, etc. on `java.lang.Class`
+  - **Java reflect invocation:** `method.invoke(...)`,
+      `field.get(...)`, `field.set(...)`,
+      `.setAccessible(true)`, `constructor.newInstance(...)`
+  - **Gosu TypeSystem API:** `TypeSystem.getByFullName(...)`,
+      `TypeSystem.getByFullNameIfValid(...)`, etc.
+
+### Configuration
+```gosu
+--rule-config reflection-use:checkJavaReflect=true,checkGosuTypeSystem=false,allowedMethods=getClass
+```
+
+  - `checkJavaReflect` (boolean, default `true`) - flag Java
+      `java.lang.reflect.*` calls
+  - `checkGosuTypeSystem` (boolean, default `true`) - flag Gosu
+      `TypeSystem.*` calls
+  - `allowedMethods` (comma-separated, default `""`) - method
+      names to skip regardless of declaring type, e.g. `"getClass,getMethod"`
+
+Token: `reflection-use`
+
+</details>
+<details>
+<summary>regex-compile-in-loop examples</summary>
+
+Detects regex compilation that repeats unnecessarily on every loop iteration.
+
+`Pattern.compile()` is relatively expensive - it parses and compiles
+the regex into an internal automaton. Calling it inside a loop wastes CPU on
+every iteration. The same applies to `String.matches()`,
+`String.replaceAll()`, and `String.replaceFirst()`: each of those
+methods silently calls `Pattern.compile()` internally every time they
+are invoked.
+
+The fix is to extract the compiled `Pattern` into a
+`private static final` field so it is created once when the class loads
+and reused on every call.
+
+### Flagged - Pattern.compile() inside a for-each loop
+```gosu
+for (item in items) {
+  var p = Pattern.compile("\\d+")   // VIOLATION: compiled every iteration
+  if (p.matcher(item).matches()) { ... }
+}
+```
+
+### Not flagged - pattern cached as a static field before the loop
+```gosu
+private static final DIGITS = Pattern.compile("\\d+")  // compiled once
+
+function process(items : List) {
+  for (item in items) {
+    if (DIGITS.matcher(item).matches()) { ... }   // OK
+  }
+}
+```
+
+### Scope notes
+
+  - Only flags when the regex argument is a string literal for
+      `matches`/`replaceAll`/`replaceFirst`. When the regex
+      comes from a variable it may already be a pre-compiled wrapper, so the
+      call is skipped to avoid false positives.
+  - `String.split()` is intentionally excluded - many split calls use
+      trivial single-character delimiters where the overhead is negligible and
+      flagging would produce too much noise.
+  - Handles for-each, while, and do-while loops.
 
 </details>
 <details>
@@ -1110,19 +1359,26 @@ recognised - the call inside will be reported as unguarded (false positive).
 
 | Token | Detects |
 |-------|---------|
+| `ambiguous-call-args` | Flags call sites with 3+ boolean or null literal arguments; suggests named parameters. |
+| `anonymous-class` | Flags `new IFoo() { ... }` anonymous class instantiations of SAM interfaces.  |
 | `block-parameter-ignored` | Flags lambda/block parameters that are declared but never referenced in the body. |
 | `constant-naming` | Flags constants not using UPPER_CASE naming convention. |
 | `constructor-order` | Flags constructors that are not ordered from most-specific to least-specific parameters. |
 | `enhancement-modifies-state` | Flags enhancement methods that mutate the enhanced type's fields via this.field = ... *(disabled by default - activate with `--rules enhancement-modifies-state`)* |
 | `excessive-newlines` | Flags excessive consecutive blank lines in code (default threshold: 2). |
-| `foreach-index-arithmetic` | Flags manual counter variables incremented inside for-each loops - use the built-in `index` clause instead. |
+| `file-header` | Checks that every source file has a comment header (// or /* */)  *(disabled by default - activate with `--rules file-header`)* |
+| `foreach-index-math` | Flags manual counter variables incremented inside for-each loops - use the built-in `index` clause instead. |
+| `indent-alignment` | Flags statements whose indentation is inconsistent with the majority of their siblings in the same block. |
 | `max-file-size` | Flags source files exceeding the configured maximum size (default: 200 KB). *(disabled by default - activate with `--rules max-file-size`)* |
 | `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--rules max-lines`)* |
+| `nested-ternary` | Flags ternary expressions whose then/else branch is itself a ternary; use if/else blocks instead. |
 | `override-grouping` | Flags `@Override` methods that are not grouped together with other overrides. |
+| `package-naming` | Flags package names containing uppercase characters. |
 | `print-statement` | Flags `print` and `println` statements; use a logging framework instead. |
 | `property-vs-method` | Flags trivial properties that should use Gosu's 'var X : T' shorthand. |
+| `regex-simplifiable` | Flags str.matches() or str.replaceAll() where a built-in String method (equals, contains, startsWith, endsWith, replace) would be clearer and safer. |
 | `string-plus-in-expansion` | Flags string concatenation (+) with a string literal inside ${} template expressions. |
-| `this-qualifier-consistency` | Flags inconsistent use of `this` qualifier on member access within a class. |
+| `this-consistency` | Flags inconsistent use of `this` qualifier on member access within a class. |
 
 <details>
 <summary>constant-naming examples</summary>
@@ -1136,7 +1392,7 @@ This rule applies to class-level variables that are declared both `static` and `
 ```gosu
 public static final int maxRetries = 3           // Noncompliant - should be MAX_RETRIES
 private static final String appVersion = "1.0"   // Noncompliant - should be APP_VERSION
-static final double PI_VALUE = 3.14              // Noncompliant - should be PI_VALUE (OK actually)
+static final double piValue = 3.14               // Noncompliant - should be PI_VALUE
 ```
 
 ### Not flagged - correct UPPER_SNAKE_CASE
@@ -1207,6 +1463,71 @@ Token: `excessive-newlines`
 
 </details>
 <details>
+<summary>indent-alignment examples</summary>
+
+Flags indentation "hiccups" within function and constructor bodies.
+
+A hiccup is a statement whose leading whitespace differs from the majority of
+its siblings in the same block. The rule takes a majority vote across every statement
+in a given `IStatementList`: the most common leading-whitespace prefix is the
+"expected" indent, and any statement that deviates from it is flagged.
+
+No particular indentation width is mandated - the rule only detects internal
+inconsistency within a single block. Each nested block (inside an `if`,
+`for`, `while`, etc.) is evaluated independently.
+
+Statement positions are resolved via `ParseTree.getOffset()` rather than
+`IStatement.getLineNum()`. Gosu's `getLineNum()` can misfire on compound
+statements (for/if/while/try), returning a line inside the statement body instead of
+the opening keyword line. Using the parse-tree offset avoids that quirk entirely.
+
+### Flagged - one statement out of alignment
+```gosu
+function process() {
+  var a = 1
+  var b = 2
+      var c = 3   // VIOLATION: 6 spaces when siblings use 2
+  var d = 4
+}
+```
+
+### Not flagged - consistent indentation
+```gosu
+function process() {
+  var a = 1
+  var b = 2
+  var c = 3
+}
+```
+
+Blocks with fewer than three non-blank statements are not checked - too few
+peers to establish a reliable majority.
+
+</details>
+<details>
+<summary>package-naming examples</summary>
+
+Detects package declarations that contain uppercase characters.
+
+Java and Gosu convention requires package names to be all lowercase
+(e.g., `com.example.util`, not `com.Example.Util`).
+Uppercase letters in package names can cause confusion and portability
+issues across case-sensitive and case-insensitive file systems.
+
+### Flagged - uppercase characters in package name
+```gosu
+package com.Example.Util    // Noncompliant - should be com.example.util
+package myApp.core          // Noncompliant - should be myapp.core
+```
+
+### Not flagged - all lowercase
+```gosu
+package com.example.util    // Compliant
+package myapp.core          // Compliant
+```
+
+</details>
+<details>
 <summary>property-vs-method examples</summary>
 
 Detects trivial properties that simply wrap a backing field with no added logic.
@@ -1258,7 +1579,7 @@ property set Name(v : String) {
 
 </details>
 <details>
-<summary>this-qualifier-consistency examples</summary>
+<summary>this-consistency examples</summary>
 
 Flags inconsistent use of the `this.` qualifier on member access within a class.
 
@@ -1296,8 +1617,10 @@ class Example {
 }
 ```
 
-Static methods are excluded from analysis. A tie (equal number of this-qualified and
-bare accesses) is not flagged.
+Static methods and constructors are excluded from analysis. Constructors frequently
+need `this.` to disambiguate field names from parameter names, so including them
+would skew the majority vote. A tie (equal number of this-qualified and bare accesses)
+is not flagged.
 
 </details>
 
