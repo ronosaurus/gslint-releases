@@ -9,10 +9,10 @@
 
 | Token | Detects |
 |-------|---------|
-| `ctor-delegation-param` | Flags constructor parameters not forwarded in explicit `this(...)` delegation calls. |
+| `ctor-delegation-param` | Flags constructor parameters not forwarded in explicit 'this(...)' delegation calls. |
 | `dead-assignment` | Flags variables assigned but never read before being overwritten or going out of scope. |
 | `identity-return` | Flags functions that perform work but return their input parameter unchanged. |
-| `null-return` | Flags functions that return `null` directly; prefer `Optional` or an empty collection. |
+| `null-return` | Flags functions that return 'null' directly; prefer 'Optional' or an empty collection. |
 | `unused-ctor-params` | Flags constructor parameters that are never read. |
 
 <details>
@@ -217,9 +217,10 @@ construct(name : String, value : int) {
 | `logger-static` | Flags logger fields that are not static (should be shared across instances). |
 | `prefer-stringbuilder` | Flags StringBuffer usage; prefer StringBuilder which avoids unnecessary synchronization in single-threaded code. |
 | `public-field` | Flags public instance fields; prefer private fields with public getter/setter. |
-| `raw-type` | Flags use of raw generic types without type parameters (e.g., `List` instead of `List<T>`). |
-| `strbuf-char-ctor` | Flags `StringBuffer`/`StringBuilder` initialized with a `char` (uses ASCII value, not char). |
-| `threadlocal-static` | Flags `ThreadLocal` fields that are not static (should be shared, not per-instance). |
+| `raw-type` | Flags use of raw generic types without type parameters (e.g., 'List' instead of 'List<T>'). |
+| `static-hashmap` | Flags static HashMap/LinkedHashMap fields that are not thread-safe; prefer ConcurrentHashMap. |
+| `strbuf-char-ctor` | Flags 'StringBuffer'/'StringBuilder' initialized with a 'char' (uses ASCII value, not char). |
+| `threadlocal-static` | Flags 'ThreadLocal' fields that are not static (should be shared, not per-instance). |
 | `too-many-args` | Flags functions with more than the configured number of parameters (default: 5). |
 
 <details>
@@ -467,10 +468,11 @@ count.
 
 | Token | Detects |
 |-------|---------|
-| `catch-null-reference` | Flags catch blocks that catch `NullPointerException` or `NullReferenceException`. |
+| `catch-null-reference` | Flags catch blocks that catch 'NullPointerException' or 'NullReferenceException'. |
+| `debug-only-catch` | Flags catch blocks containing only debug/trace log calls, which are (usually) silent in production and equivalent to empty catches. |
 | `empty-catch` | Flags catch blocks with no statements (swallowed exceptions). |
 | `exception-swallowed-in-finally` | Flags return or throw inside finally blocks that silently discard propagating exceptions. |
-| `rethrow-catch` | Flags redundant `catch`/`rethrow` patterns that should use `throws` instead. |
+| `rethrow-catch` | Flags redundant 'catch'/'rethrow' patterns that should use 'throws' instead. |
 | `too-many-throws` | Flags functions with more than the configured number of declared exceptions (default: 3). |
 
 <details>
@@ -504,6 +506,73 @@ var name = getRecord()?.Name ?: ""  // elvis fallback
 
 </details>
 <details>
+<summary>debug-only-catch examples</summary>
+
+Flags catch blocks that contain only `log.debug()` or `log.trace()` calls.
+
+Debug and trace logging is typically disabled in production, so a catch block that
+contains only these calls is functionally silent - identical to an empty catch block
+from a diagnostic perspective. The `empty-catch` rule does not fire on these
+because they contain a method call, but the exception is still effectively swallowed.
+
+### Flagged
+```gosu
+} catch (e : Exception) {
+  log.debug("parse failed: " + e.getMessage())  // VIOLATION: silent in production
+}
+```
+
+### Not flagged
+```gosu
+} catch (e : Exception) {
+  log.warn("parse failed", e)   // OK: warn/info/error visible in production
+}
+} catch (e : Exception) {
+  log.debug("rethrowing", e)
+  throw new RuntimeException(e) // OK: throw is meaningful regardless of log level
+}
+```
+
+### Detection
+
+A catch block is flagged when:
+
+  - It is not structurally empty (that is `empty-catch`'s responsibility).
+  - It contains at least one `log.debug()` or `log.trace()` call.
+  - It contains no production-meaningful statement: no throw, return,
+      assignment, or non-debug/trace method call. Variable declarations alone do not
+      count as meaningful (consistent with `empty-catch` semantics).
+
+Logger receivers are identified by the same two-pronged strategy used in
+`UnguardedLogCallRule`: resolved type name contains "log" (e.g.
+`org.slf4j.Logger` → simple name `Logger`), falling back to the
+receiver expression's text when the type is unresolved.
+
+</details>
+<details>
+<summary>exception-swallowed-in-finally examples</summary>
+
+Flags `return` or `throw` statements inside `finally` blocks.
+
+A `return` or `throw` in a `finally` block silently discards
+any exception propagating from the `try` or `catch` block. The original
+failure disappears with no trace, making bugs extremely hard to diagnose.
+
+```gosu
+// BAD - the IOException from the try block is silently discarded
+function readFile(path : String) : String {
+  try {
+    return FileUtil.readFile(path)  // throws IOException
+  } finally {
+    return ""                        // swallows the exception
+  }
+}
+```
+
+Token: `exception-swallowed-in-finally`
+
+</details>
+<details>
 <summary>rethrow-catch examples</summary>
 
 Detects `catch` blocks that do nothing except rethrow the caught exception.
@@ -534,9 +603,9 @@ Catch blocks that wrap the exception before rethrowing are not flagged:
 
 | Token | Detects |
 |-------|---------|
-| `chained-expansion` | Flags member expansion (`*.`) operators where the root is also a `*.` expression. |
-| `expansion-result-unused` | Flags member expansion (`*.`) results that are computed but not used. |
-| `expansion-void-call` | Flags member expansion (`*.`) calls on void methods (returns nothing to expand). |
+| `chained-expansion` | Flags member expansion ('*.') operators where the root is also a '*.' expression. |
+| `expansion-result-unused` | Flags member expansion ('*.') results that are computed but not used. |
+| `expansion-void-call` | Flags member expansion ('*.') calls on void methods (returns nothing to expand). |
 
 <details>
 <summary>chained-expansion examples</summary>
@@ -628,13 +697,14 @@ CLI token: `expansion-void-call`
 |-------|---------|
 | `blank-line-before-else` | Flags else/else-if clauses separated from the closing '}' by a blank line. |
 | `complex-boolean` | Flags boolean expressions with too many operators (default threshold: 3). |
-| `duplicate-condition` | Flags `if`/`else-if` chains where the same condition appears more than once. |
-| `logical-and-style` | Flags inconsistent spacing or style around logical AND (`&&`) operators. |
-| `logical-or-style` | Flags inconsistent spacing or style around logical OR (`||`) operators. |
-| `missing-braces` | Flags `if`/`for`/`while` bodies not wrapped in braces (can cause statement-merging bugs). |
+| `duplicate-condition` | Flags if/else-if chains where the same condition appears more than once. |
+| `logical-and-style` | Flags inconsistent spacing or style around logical AND ('&&') operators. |
+| `logical-or-style` | Flags inconsistent spacing or style around logical OR ('||') operators. |
+| `missing-braces` | Flags 'if'/'for'/'while' bodies not wrapped in braces (can cause statement-merging bugs). |
+| `prefer-safe-navigation` | Flags null-guard chains that can be simplified using Gosu's '?.' safe-navigation operator. |
 | `single-case-switch` | Flags switch statements with only one case clause - replace with an if statement. |
-| `switch-default` | Flags `switch` statements missing a `default` branch. |
-| `too-many-returns` | Flags functions with more than the configured number of `return` statements (default: 5). |
+| `switch-default` | Flags 'switch' statements missing a 'default' branch. |
+| `too-many-returns` | Flags functions with more than the configured number of 'return' statements (default: 5). |
 | `while-literal-condition` | Flags while(true) (infinite loop) and while(false) (dead code) loop conditions. |
 
 <details>
@@ -694,6 +764,37 @@ without depending on `IStatementList.getLastLine()` accuracy.
 
 </details>
 <details>
+<summary>complex-boolean examples</summary>
+
+Flags boolean expressions with too many `and`/`or` operators.
+
+Each `and` or `or` operator in a single condition is counted.
+When the count exceeds {@value #DEFAULT_MAX_OPERATORS} the expression is
+flagged. The threshold is configurable via `configure(Map)` with key
+`"maxOperators"`, or via the CLI flag
+`--rule-config complex-boolean:maxOperators=2`.
+
+Checked statement types: `if` / `else if`, `while`, `do-while`,
+`switch` (discriminant), `return`, local `var` initializers, and
+assignment statements.
+
+Example violation (6 operators):
+```gosu
+if ((x and y) or (a == b) and (c == d) or (e != f) and (g == (h or i))) { ... }
+```
+
+Recommended fix - extract named booleans:
+```gosu
+var isXY  = x and y
+var isABC = a == b and c == d
+var isDEF = e != f and g == (h or i)
+if (isXY or isABC or isDEF) { ... }
+```
+
+Token: `complex-boolean`
+
+</details>
+<details>
 <summary>duplicate-condition examples</summary>
 
 Detects `if / else if` chains where a condition expression is repeated -
@@ -720,8 +821,72 @@ else if (param == 3)
 ```
 
 Condition equality is determined by comparing the string representation returned by
-`Object.toString()` on the condition expression (after normalising whitespace).  This is sufficient for
+`Object.toString()` on the condition expression (after normalizing whitespace).  This is sufficient for
 the common cases of literal comparisons, boolean variables, and simple method calls.
+
+</details>
+<details>
+<summary>missing-braces examples</summary>
+
+to hide from RulesDocGenerator):
+
+Detection strategy:
+The Gosu parser strips curly braces from the AST; both braced and brace-free
+single-statement bodies produce the same node type. Detection uses source line
+numbers from the AST combined with raw source lines:
+
+  If body: check if any source line in the range [ifLine, thenLine] contains '{'.
+    thenLine is included because when the if condition spans multiple lines, the
+    opening '{' appears on the last condition line, which is what IStatementList.getLineNum()
+    returns. As a fallback, also checks for Allman-style braces: a standalone '{'
+    on the line immediately after the condition ends (using the condition expression's
+    line number to handle multi-line conditions).
+
+  Else body: check if any source line in the range [thenLine + 1, elseLine] contains '{'.
+    elseLine is included because when the else body is a StatementList, getLineNum()
+    returns the '} else {' line itself, not the first statement inside.
+
+Known limitation: a '{' character inside a string literal or comment on an otherwise
+brace-free line will cause a false negative. This is uncommon in practice.
+/
+/**
+Flags `if` and `else` branches that omit curly braces.
+
+Brace-free single-statement branches are a common source of bugs - the
+classic example being Apple's "goto fail" SSL vulnerability, where an
+unbraced `if` caused security logic to be silently skipped:
+
+```gosu
+if (condition)
+    doA()
+    doB()     // always runs, even when condition is false
+```
+
+Both `if` bodies and `else` bodies are checked. `else if`
+chains are handled naturally - each `if` in the chain is checked
+independently by the AST collector.
+
+Token: `missing-braces`
+
+</details>
+<details>
+<summary>prefer-safe-navigation examples</summary>
+
+Detects null-guard chains in `&&` conditions where a variable is null-checked
+and then used via member access in the same chain. Such patterns can be rewritten
+using Gosu's `?.` safe-navigation operator.
+
+### Flagged example
+```gosu
+if (product != null && product.getPrice() != null && product.getPrice().Amount > 0)
+```
+
+### Preferred rewrite
+```gosu
+if (product?.Price?.Amount > 0)
+```
+
+Token: `prefer-safe-navigation`
 
 </details>
 <details>
@@ -806,31 +971,31 @@ while (!queue.empty()) { // OK: computed condition
 | Token | Detects |
 |-------|---------|
 | `bigdecimal-constant` | Flags new BigDecimal(0/1/10) and suggests BigDecimal.ZERO/ONE/TEN constants instead. |
-| `bitshift` | Flags bitshift operators (`<<`, `>>`, `>>>`) that are usually mistakes in business logic. |
-| `bitwise-operator` | Flags bitwise operators (`|`, `&`, `~`) that may be confused with logical operators. |
-| `concurrenthashmap-contains` | Flags unsafe use of `.contains()` instead of `.containsKey()` on ConcurrentHashMaps. |
+| `bitshift` | Flags bitshift operators ('<<', '>>', '>>>') that are usually mistakes in business logic. |
+| `bitwise-operator` | Flags bitwise operators ('|', '&', '~') that may be confused with logical operators. |
+| `concurrenthashmap-contains` | Flags unsafe use of '.contains()' instead of '.containsKey()' on ConcurrentHashMaps. |
 | `consecutive-log-calls` | Flags runs of 2+ consecutive same-level log calls on the same logger that should be merged into one. |
-| `date-time-format` | Flags incorrect date/time format patterns (e.g., `mm` instead of `MM` for months). |
+| `date-time-format` | Flags incorrect date/time format patterns (e.g., 'mm' instead of 'MM' for months). |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
 | `explicit-gc` | Flags System.gc() and Runtime.getRuntime().gc() calls (the JVM should manage GC; explicit calls cause unpredictable pauses). |
 | `foreach-modify` | Flags collection mutations on the same collection being iterated in a foreach loop. |
-| `immutable-collection-null` | Flags null arguments passed to immutable collection factories (`List.of`, `Set.of`, `Map.of`). |
-| `indexed-removal` | Flags `list.remove(i)` by index during for-each iteration (causes element skipping). |
+| `immutable-collection-null` | Flags null arguments passed to immutable collection factories ('List.of', 'Set.of', 'Map.of'). |
+| `indexed-removal` | Flags 'list.remove(i)' by index during for-each iteration (causes element skipping). |
 | `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..|). |
 | `malformed-string-interpolation` | Flags string interpolation with mismatched or incorrect syntax. |
-| `map-returns-collection` | Flags `map()` operations that return nested collections that could be flattened with `flatMap()`. |
+| `map-returns-collection` | Flags 'map()' operations that return nested collections that could be flattened with 'flatMap()'. |
 | `process-spawn` | Flags Runtime.exec() and new ProcessBuilder(...) calls (OS process spawning is fragile and a source of command-injection vulnerabilities). |
 | `redundant-size-check` | Flags redundant size comparisons that are always true or always false. |
 | `reflection-use` | Flags Java java.lang.reflect.* calls and Gosu TypeSystem.* calls that bypass compile-time type safety. |
 | `regex-bad-pattern` | Flags regex patterns with ReDoS risk, invalid character ranges, or trivially broad wildcards. |
 | `regex-compile-in-loop` | Flags Pattern.compile() and implicit regex compilation (matches/replaceAll/replaceFirst) inside loops. |
 | `string-literal-arg` | Flags raw string literals passed as arguments to configured method names. Requires 'methods' config key. *(disabled by default - activate with `--rules string-literal-arg`)* |
-| `synchronized-method` | Flags `synchronized` method modifiers; prefer explicit lock objects. |
-| `system-exit` | Flags `System.exit()` calls (usually a mistake in library code). |
+| `synchronized-method` | Flags 'synchronized' method modifiers; prefer explicit lock objects. |
+| `system-exit` | Flags 'System.exit()' calls (usually a mistake in library code). |
 | `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--rules thread-primitives`)* |
-| `thread-sleep` | Flags `Thread.sleep()` calls (usually a mistake; use events or futures instead). |
-| `tomap-no-merge` | Flags `toMap()` without a merge function on non-unique keys (throws exception at runtime). |
-| `tostring-misuse` | Flags incorrect use of `.toString()` on arrays, streams, and optional objects. |
+| `thread-sleep` | Flags 'Thread.sleep()' calls (usually a mistake; use events or futures instead). |
+| `tomap-no-merge` | Flags 'toMap()' without a merge function on non-unique keys (throws exception at runtime). |
+| `tostring-misuse` | Flags incorrect use of '.toString()' on arrays, streams, and optional objects. |
 | `unguarded-log-call` | Flags log.debug() and log.trace() calls not wrapped in isDebugEnabled()/isTraceEnabled() guards. |
 | `unsafe-static-formatter` | Flags static SimpleDateFormat/DateFormat fields; these are thread-unsafe and should be instance-level or use java.time.format.DateTimeFormatter. *(disabled by default - activate with `--rules unsafe-static-formatter`)* |
 
@@ -861,6 +1026,32 @@ new BigDecimal("3.14")    // no named constant for 3.14
 new BigDecimal(someVar)   // not a literal
 BigDecimal.ZERO           // already using the constant
 ```
+
+</details>
+<details>
+<summary>bitwise-operator examples</summary>
+
+Detects bitwise operators (`&`, `|`, `^`).
+
+Bitwise operators on non-flag integer values are rare in high-level
+business logic and are a common source of bugs - most often the developer
+intended the short-circuit boolean operators (`&&` / `and`,
+`||` / `or`) instead.
+
+Common mistakes caught by this rule:
+```gosu
+if (a & b) { ... }     // likely meant a && b
+if (x | y) { ... }     // likely meant x || y
+var mask = flags ^ 0xFF // legitimate but worth flagging for review
+```
+
+Configuration:
+
+  - `allowHashCode` (boolean, default `false`) - when `true`, bitwise
+      operators inside a `hashCode` function are not flagged. Bitwise ops are idiomatic
+      in manual `hashCode` implementations (e.g. `result = 31 * result ^ field`).
+
+Token: `bitwise-operator`
 
 </details>
 <details>
@@ -1078,6 +1269,29 @@ for (i in (list.Count - 1).downto(0)) {
   list.remove(i)  // Safe: iterating backwards prevents index shift
 }
 ```
+
+</details>
+<details>
+<summary>interval-boundary-confusion examples</summary>
+
+Flags inclusive `..` range literals whose right-hand side is a
+`.size()`, `.length()`, or `.Count` call.
+
+Gosu provides `0..n` (inclusive upper bound) and `0..|n`
+(exclusive upper bound). When the upper bound is a size or length, the intent
+is almost always exclusive - iterating indices 0 through n-1. Using `..`
+instead of `..|`  silently causes an off-by-one and typically an
+`IndexOutOfBoundsException` at runtime.
+
+```gosu
+// BAD - iterates 0 through items.size() inclusive
+for (i in 0..items.size()) { ... }
+
+// GOOD - exclusive upper bound
+for (i in 0..|items.size()) { ... }
+```
+
+Token: `interval-boundary-confusion`
 
 </details>
 <details>
@@ -1329,7 +1543,7 @@ Unguarded debug/trace calls cause argument expressions (string concatenation, me
 invocations) to be evaluated even when the log level is disabled, wasting CPU in production.
 
 Both the Java method-call form (`if (log.isDebugEnabled())`) and the Gosu property
-form (`if (log.DebugEnabled)`) are recognised as valid guards.
+form (`if (log.DebugEnabled)`) are recognized as valid guards.
 
 ### Flagged
 ```gosu
@@ -1348,10 +1562,26 @@ if (LOG.DebugEnabled) {
 LOG.info("server started")            // OK: info/warn/error not guarded
 ```
 
+### Configuration
+
+  KeyTypeDefaultDescription
+  
+    `allowCheapArgs`
+    boolean
+    `false`
+    When `true`, unguarded debug/trace calls whose arguments are all
+        "cheap" (string/numeric/boolean literals, local variables of primitive or
+        String type, concatenation of cheap values, or template strings with only
+        cheap interpolations) are not flagged. Property accesses and method calls
+        are always considered expensive.
+  
+
+Usage: `--rule-config unguarded-log-call:allowCheapArgs=true`
+
 ### Known limitation
 
 Compound guard conditions such as `if (cond && log.isDebugEnabled())` are not
-recognised - the call inside will be reported as unguarded (false positive).
+recognized - the call inside will be reported as unguarded (false positive).
 
 </details>
 
@@ -1360,26 +1590,87 @@ recognised - the call inside will be reported as unguarded (false positive).
 | Token | Detects |
 |-------|---------|
 | `ambiguous-call-args` | Flags call sites with 3+ boolean or null literal arguments; suggests named parameters. |
-| `anonymous-class` | Flags `new IFoo() { ... }` anonymous class instantiations of SAM interfaces.  |
+| `anonymous-class` | Flags 'new IFoo() { ... }' anonymous class instantiations of SAM interfaces.  |
 | `block-parameter-ignored` | Flags lambda/block parameters that are declared but never referenced in the body. |
+| `comment-density` | Flags source files whose comment-to-code ratio falls below the configured  *(disabled by default - activate with `--rules comment-density`)* |
 | `constant-naming` | Flags constants not using UPPER_CASE naming convention. |
 | `constructor-order` | Flags constructors that are not ordered from most-specific to least-specific parameters. |
 | `enhancement-modifies-state` | Flags enhancement methods that mutate the enhanced type's fields via this.field = ... *(disabled by default - activate with `--rules enhancement-modifies-state`)* |
 | `excessive-newlines` | Flags excessive consecutive blank lines in code (default threshold: 2). |
+| `field-order` | Flags field declarations that appear after constructors or methods. |
 | `file-header` | Checks that every source file has a comment header (// or /* */)  *(disabled by default - activate with `--rules file-header`)* |
-| `foreach-index-math` | Flags manual counter variables incremented inside for-each loops - use the built-in `index` clause instead. |
+| `foreach-index-math` | Flags manual counter variables incremented inside for-each loops - use the built-in 'index' clause instead. |
 | `indent-alignment` | Flags statements whose indentation is inconsistent with the majority of their siblings in the same block. |
+| `long-line` | Flags source lines exceeding the configured maximum length (default: 150 characters). |
 | `max-file-size` | Flags source files exceeding the configured maximum size (default: 200 KB). *(disabled by default - activate with `--rules max-file-size`)* |
+| `max-function-lines` | Flags functions or constructors whose source span exceeds the configured maximum (default: 75 lines). |
 | `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--rules max-lines`)* |
+| `max-ncss` | Flags source files whose non-commenting source statement count  *(disabled by default - activate with `--rules max-ncss`)* |
 | `nested-ternary` | Flags ternary expressions whose then/else branch is itself a ternary; use if/else blocks instead. |
-| `override-grouping` | Flags `@Override` methods that are not grouped together with other overrides. |
+| `override-grouping` | Flags '@Override' methods that are not grouped together with other overrides. |
 | `package-naming` | Flags package names containing uppercase characters. |
-| `print-statement` | Flags `print` and `println` statements; use a logging framework instead. |
+| `print-statement` | Flags 'print' and 'println' statements; use a logging framework instead. |
 | `property-vs-method` | Flags trivial properties that should use Gosu's 'var X : T' shorthand. |
 | `regex-simplifiable` | Flags str.matches() or str.replaceAll() where a built-in String method (equals, contains, startsWith, endsWith, replace) would be clearer and safer. |
 | `string-plus-in-expansion` | Flags string concatenation (+) with a string literal inside ${} template expressions. |
-| `this-consistency` | Flags inconsistent use of `this` qualifier on member access within a class. |
+| `this-consistency` | Flags inconsistent use of 'this' qualifier on member access within a class. |
+| `undocumented-complex-function` | Flags functions whose cyclomatic complexity meets or exceeds minScore (default: 10)  *(disabled by default - activate with `--rules undocumented-complex-function`)* |
 
+<details>
+<summary>ambiguous-call-args examples</summary>
+
+Flags call sites where 2 or more arguments are boolean or null literals,
+making the call hard to read without knowing the function signature.
+
+Example of the pattern this rule detects:
+```gosu
+someMethod(true, false, null, false, true)  // what do these mean?
+```
+
+The preferred Gosu style is named parameters at the call site:
+```gosu
+someMethod(:enableLogging = true, :debug = false,
+           :contextObject = null, :trace = false,
+           :summarizeTiming = true)
+```
+
+When the method descriptor resolves (Gosu-defined methods), the violation
+message includes the ambiguous parameter names to make the fix obvious.
+For Java library calls the message falls back to a generic suggestion.
+
+The threshold is configurable via `--rule-config ambiguous-call-args:minAmbiguousArgs=N`
+(default: 3). Setting it to 1 flags even single-boolean calls like `setEnabled(true)`.
+
+CLI token: `ambiguous-call-args`
+
+</details>
+<details>
+<summary>block-parameter-ignored examples</summary>
+
+Flags lambda/block expressions with declared parameters that are never referenced
+in the body.
+
+A block parameter that goes unused is misleading - it implies the body depends
+on each element when it does not. The cleaner form omits the parameter entirely
+or uses a method reference. The smell also suggests a potential logic error where
+the developer forgot to use the value.
+
+```gosu
+// BAD - `item` is declared but never used
+var names = customers.map(\ item -> "Unknown")
+
+// GOOD - parameter is actually used
+var names = customers.map(\ item -> item.Name)
+```
+
+Configurable via `--rule-config block-parameter-ignored:allowTypes=Type1,Type2.method`:
+
+  - `Type` - suppress for any method call on that receiver type
+  - `Type.method` - suppress only for that specific method
+
+Token: `block-parameter-ignored`
+
+</details>
 <details>
 <summary>constant-naming examples</summary>
 
@@ -1463,6 +1754,46 @@ Token: `excessive-newlines`
 
 </details>
 <details>
+<summary>foreach-index-math examples</summary>
+
+Flags manual counter variables declared before a for-each loop and incremented inside it.
+
+Gosu's `for (item in collection index i)` syntax provides a built-in,
+zero-based index variable. Maintaining a separate counter is redundant boilerplate
+that can drift from the real index if `continue` or other control flow is used,
+and it signals unfamiliarity with the language.
+
+```gosu
+// BAD - manually tracking an index that Gosu's `index` clause provides for free
+var counter = 0
+for (item in items) {
+    print(counter + ": " + item)
+    counter++
+}
+
+// GOOD - use the built-in index clause
+for (item in items index i) {
+    print(i + ": " + item)
+}
+```
+
+The rule does NOT flag the counter if it is referenced outside the loop body,
+since in that case it serves a broader purpose (e.g. accumulating a total) that
+the built-in `index` variable cannot replace:
+```gosu
+// PASS - counter used after the loop; cannot be replaced by index clause
+var counter = 0
+for (item in items) {
+    print(counter + ": " + item)
+    counter++
+}
+print("Total: " + counter)
+```
+
+Token: `foreach-index-math`
+
+</details>
+<details>
 <summary>indent-alignment examples</summary>
 
 Flags indentation "hiccups" within function and constructor bodies.
@@ -1502,6 +1833,33 @@ function process() {
 
 Blocks with fewer than three non-blank statements are not checked - too few
 peers to establish a reliable majority.
+
+</details>
+<details>
+<summary>nested-ternary examples</summary>
+
+Detects ternary expressions that have another ternary expression in their
+`then` or `else` branch (nested ternaries).
+
+Nested ternaries are harder to read than equivalent `if/else` blocks.
+For example:
+```gosu
+// BAD - hard to follow at a glance
+var name = (fs != null) ? fs.Name : (gs != null) ? gs.Name : "?"
+
+// GOOD - the intent is immediately clear
+var name : String
+if (fs != null) {
+  name = fs.Name
+} else if (gs != null) {
+  name = gs.Name
+} else {
+  name = "?"
+}
+```
+
+Only the outer ternary in a chain is flagged; the rule does not double-flag
+a single nesting level. Each additional nesting level produces one extra violation.
 
 </details>
 <details>
@@ -1579,6 +1937,28 @@ property set Name(v : String) {
 
 </details>
 <details>
+<summary>string-plus-in-expansion examples</summary>
+
+Flags string concatenation (`+`) inside a template interpolation expression
+(`${`}) when one operand is a string literal.
+
+Gosu string templates (`"Hello ${expr`"}) already handle interpolation.
+Embedding a `+` concatenation inside `${`} where one side is a literal
+is redundant - the literal can be moved outside the braces or inlined as a separate
+interpolation segment, making the template cleaner and more readable.
+
+```gosu
+// BAD
+var msg = "Result: ${"prefix_" + value}"
+
+// Better
+var msg = "Result: prefix_${value}"
+```
+
+Token: `string-plus-in-expansion`
+
+</details>
+<details>
 <summary>this-consistency examples</summary>
 
 Flags inconsistent use of the `this.` qualifier on member access within a class.
@@ -1632,10 +2012,10 @@ is not flagged.
 | `cls01g-public-reference-field` | Flags public reference fields; prefer private fields with public getter/setter. |
 | `cls01g-readonly-array` | Flags array properties without a copy-on-return to prevent external modification. |
 | `cls01g-readonly-reference` | Flags reference properties without defensive copying to prevent external modification. |
-| `err01g-throw-generic` | Flags throwing generic `Exception` instead of a specific exception type. |
+| `err01g-throw-generic` | Flags throwing generic 'Exception' instead of a specific exception type. |
 | `err01g-throw-string` | Flags throwing non-exception objects (strings, primitives) instead of exceptions. |
-| `res00g-close-not-in-finally` | Flags resource close statements not in a `finally` block or `using` statement. |
-| `res00g-not-in-using` | Flags closeable resources not used in a `using` statement or try-with-resources. |
+| `res00g-close-not-in-finally` | Flags resource close statements not in a 'finally' block or 'using' statement. |
+| `res00g-not-in-using` | Flags closeable resources not used in a 'using' statement or try-with-resources. |
 | `res00g-unsafe-close-in-finally` | Flags unsafe resource closing in finally blocks without null checks. |
 
 <details>

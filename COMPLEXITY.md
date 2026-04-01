@@ -62,11 +62,14 @@ java -jar gslint.jar complexity --pattern "src/**/*.gs" --init-src-root src --me
 <details>
 <summary>cyclomatic complexity examples</summary>
 
-Calculates cyclomatic complexity for every function in a Gosu source file.
+Calculates cyclomatic complexity for every function in a Gosu source file using
+McCabe's cyclomatic complexity metric (Thomas J. McCabe, 1976).
 
 Cyclomatic complexity starts at 1 per function and increments by 1 for each decision
 point: `if`, `while`, `do-while`, `for`/`foreach`,
 `case` clause, `catch` clause, ternary (`?:`), `&&`, and `||`.
+This is equivalent to McCabe's formula `M = 1 + d`, where `d` is the number of
+decision points - counting the linearly independent paths through the control flow graph.
 
 Lambda/block expressions (`IBlockExpression`) are
 handled according to the `includeLambdaComplexity` flag passed to the constructor:
