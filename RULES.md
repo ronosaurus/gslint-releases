@@ -211,6 +211,7 @@ construct(name : String, value : int) {
 
 | Token | Detects |
 |-------|---------|
+| `annotated-base` | Flags classes extending or implementing types with specified annotations *(disabled by default - activate with `--rules annotated-base`)* |
 | `deep-inheritance` | Flags classes with deep superclass chains (default: >5) or too many direct interfaces (default: >5). |
 | `delegate-member-conflict` | Flags class methods that shadow delegate-synthesized forwarding methods. |
 | `duplicate-delegate` | Flags multiple delegate fields that represent the same interface. |
@@ -221,7 +222,9 @@ construct(name : String, value : int) {
 | `prefer-stringbuilder` | Flags StringBuffer usage; prefer StringBuilder which avoids unnecessary synchronization in single-threaded code. |
 | `public-field` | Flags public instance fields; prefer private fields with public getter/setter. |
 | `raw-type` | Flags use of raw generic types without type parameters (e.g., 'List' instead of 'List<T>'). |
+| `static-concurrent-map` | Flags static ConcurrentHashMap fields with no remove/clear call; entries accumulate forever in long-running servers. |
 | `static-hashmap` | Flags static HashMap/LinkedHashMap fields that are not thread-safe; prefer ConcurrentHashMap. |
+| `static-map-forbidden-type` | Flags static Map fields storing forbidden types (e.g., request-scoped entities, sessions); configurable via forbiddenTypes. |
 | `strbuf-char-ctor` | Flags 'StringBuffer'/'StringBuilder' initialized with a 'char' (uses ASCII value, not char). |
 | `string-literal-arg` | Flags string literals and string constant fields passed to methods that also accept a feature literal (IPropertyInfo / IMethodInfo). Use a feature literal (#FeatureName) instead so the compiler validates the name. |
 | `threadlocal-static` | Flags 'ThreadLocal' fields that are not static (should be shared, not per-instance). |
@@ -454,6 +457,58 @@ Instead:
 
 </details>
 <details>
+<summary>static-concurrent-map examples</summary>
+
+Flags `static` `ConcurrentHashMap` fields that have no
+eviction call (`remove`, `clear`, or `removeIf`) anywhere in the class.
+
+A static `ConcurrentHashMap` is a common pattern for an in-process cache.
+`ConcurrentHashMap` is thread-safe, so concurrent access is not the concern here -
+the risk is unbounded memory growth. In a long-running server that goes weeks without a
+restart or redeploy, entries that should have expired hours ago continue to accumulate,
+eventually causing memory pressure or stale-data bugs.
+
+The correct fix is to replace the bare map with a proper caching library such as
+Guava `Cache` or Caffeine, which support TTL expiry, max-size eviction, and
+optional soft/weak references - all without changing the calling code significantly.
+
+### Flagged
+```gosu
+// No eviction anywhere in the class - entries accumulate forever
+static var _sessionCache : ConcurrentHashMap
+static var _typeIndex    : java.util.concurrent.ConcurrentHashMap
+```
+
+### Not flagged
+```gosu
+// Non-static - bounded to the object's lifetime, not a shared global
+var _localCache : ConcurrentHashMap
+
+// Lookup-only: no put/compute/merge anywhere on this field - populated at
+// init time and never grown at runtime, so unbounded growth is impossible
+static var _codes : ConcurrentHashMap = buildCodes()
+private static function buildCodes() : ConcurrentHashMap {
+  var m = new ConcurrentHashMap()
+  m.put("A", 1)   // puts are on the local variable, not on _codes
+  return m
+}
+function getCode(key : String) : Integer { return _codes.get(key) }
+
+// Static with remove() call somewhere in the class
+static var _tokenCache : ConcurrentHashMap
+function invalidate(key : String) { _tokenCache.remove(key) }
+
+// Static with clear() - e.g. in a reset/shutdown method
+static var _stateMap : ConcurrentHashMap
+static function reset() { _stateMap.clear() }
+
+// Static with removeIf() - TTL-style purge
+static var _ttlMap : ConcurrentHashMap
+static function purge() { _ttlMap.removeIf(\e -> isExpired(e.Value)) }
+```
+
+</details>
+<details>
 <summary>static-hashmap examples</summary>
 
 Flags `static` fields whose declared type is `HashMap` or
@@ -482,6 +537,55 @@ var localCache : HashMap = new HashMap()  // instance field - not shared across 
 Type resolution is `TypeResolution.HELPFUL`: when the declared
 type's FQN is available the match is exact, otherwise it falls back to the
 simple name so the rule still fires under partial classpaths.
+
+</details>
+<details>
+<summary>static-map-forbidden-type examples</summary>
+
+Flags `static` Map fields whose type parameters (key or value) match
+configured forbidden types. This rule is intended to catch resource-leak patterns:
+storing request-scoped objects (e.g., entities with open database connections,
+HTTP sessions) in static Maps that outlive the request.
+
+Static Maps outlive the HTTP request lifecycle, so holding references to
+request-scoped objects (entities, sessions, active database connections) can
+cause resource leaks. Local maps within functions are fine - they are destroyed
+when the function exits. Instance (non-static) maps are not flagged by this rule.
+
+Type matching is substring-based (uses `contains()`), so it handles:
+
+  - Exact type names: `forbiddenTypes=com.example.IEntity`
+  - Package prefixes: `forbiddenTypes=com.example.entity` (matches all types in that package and sub-packages)
+  - Simple name patterns: `forbiddenTypes=Entity` (matches UserEntity, BaseEntity, etc.)
+
+Limitation: Type matching is by name only, not by type hierarchy.
+If a type implements an interface that is in the forbidden list, it will only be
+flagged if its own name matches. To flag all implementations, add all concrete
+type names to the config.
+
+Disabled by default: This rule has no default forbidden types.
+It only fires when explicitly configured via `--rule-config`.
+
+### Configuration
+`--rule-config static-map-forbidden-type:forbiddenTypes=IEntity,HttpSession,com.example.entity`
+
+### Flagged
+```gosu
+static var cache : HashMap = new HashMap()        // value type 'IEntity' is forbidden
+static var index : ConcurrentHashMap = new ConcurrentHashMap()  // key type 'IEntity' is forbidden
+static var sessions : Map = new HashMap()  // value type matches 'HttpSession'
+```
+
+### Not flagged
+```gosu
+static var cache : HashMap = new HashMap()  // no forbidden types
+var localMap : HashMap = new HashMap()  // not static - destroyed when function exits
+static var safe : ConcurrentHashMap = new ConcurrentHashMap()  // no forbidden types
+```
+
+Type resolution is `TypeResolution.HELPFUL`: when the type FQN is available
+the match is precise, otherwise it falls back to the simple name so the rule still
+fires under partial classpaths.
 
 </details>
 <details>
@@ -879,7 +983,7 @@ CLI token: `expansion-void-call`
 | `duplicate-branch-code` | Flags if/else branches with identical or near-identical code blocks. |
 | `duplicate-condition` | Flags if/else-if chains where the same condition appears more than once. |
 | `logical-and-style` | Flags inconsistent spacing or style around logical AND ('&&') operators. |
-| `logical-or-style` | Flags inconsistent spacing or style around logical OR ('||') operators. |
+| `logical-or-style` | Flags inconsistent spacing or style around logical OR ('\|\|') operators. |
 | `missing-braces` | Flags 'if'/'for'/'while' bodies not wrapped in braces (can cause statement-merging bugs). |
 | `prefer-safe-navigation` | Flags null-guard chains that can be simplified using Gosu's '?.' safe-navigation operator. |
 | `single-case-switch` | Flags switch statements with only one case clause - replace with an if statement. |
@@ -1246,7 +1350,7 @@ while (!queue.empty()) { // OK: computed condition
 |-------|---------|
 | `bigdecimal-constant` | Flags new BigDecimal(0/1/10) and suggests BigDecimal.ZERO/ONE/TEN constants instead. |
 | `bitshift` | Flags bitshift operators ('<<', '>>', '>>>') that are usually mistakes in business logic. |
-| `bitwise-operator` | Flags bitwise operators ('|', '&', '~') that may be confused with logical operators. |
+| `bitwise-operator` | Flags bitwise operators ('\|', '&', '~') that may be confused with logical operators. |
 | `concurrenthashmap-contains` | Flags unsafe use of '.contains()' instead of '.containsKey()' on ConcurrentHashMaps. |
 | `consecutive-log-calls` | Flags runs of 2+ consecutive same-level log calls on the same logger that should be merged into one. |
 | `date-time-format` | Flags incorrect date/time format patterns (e.g., 'mm' instead of 'MM' for months). |
@@ -1264,8 +1368,9 @@ while (!queue.empty()) { // OK: computed condition
 | `immutable-collection-null` | Flags null arguments passed to immutable collection factories ('List.of', 'Set.of', 'Map.of'). |
 | `indexed-removal` | Flags 'list.remove(i)' by index during for-each iteration (causes element skipping). |
 | `inline-collection-call` | Flags method calls made directly on an inline collection or map literal  |
+| `insecure-random` | Flags 'new java.util.Random()' - use SecureRandom for security-sensitive randomness. |
 | `insecure-tls-trust` | Flags classes implementing HostnameVerifier or X509TrustManager, which are commonly used to disable TLS validation. |
-| `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..|). |
+| `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..\|). |
 | `java-final-override` | Flags Gosu overrides of final Java methods. |
 | `lock-not-in-finally` | Flags lock() calls in a try body whose finally block is missing or lacks unlock(); deadlock risk. |
 | `log-entry-exit` | Flags trace/debug entry and exit log calls at function boundaries. |
@@ -1287,6 +1392,7 @@ while (!queue.empty()) { // OK: computed condition
 | `tostring-misuse` | Flags incorrect use of '.toString()' on arrays, streams, and optional objects. |
 | `unguarded-log-call` | Flags log.debug() and log.trace() calls not wrapped in isDebugEnabled()/isTraceEnabled() guards. |
 | `unsafe-static-formatter` | Flags static SimpleDateFormat/DateFormat fields; these are thread-unsafe and should be instance-level or use java.time.format.DateTimeFormatter. *(disabled by default - activate with `--rules unsafe-static-formatter`)* |
+| `xxe-unsafe-factory` | Flags DocumentBuilderFactory.newInstance() not followed by setFeature(FEATURE_SECURE_PROCESSING, true) - XML parsers are XXE-vulnerable by default. |
 
 <details>
 <summary>bigdecimal-constant examples</summary>
@@ -1428,6 +1534,43 @@ class MyThread extends Thread {
 // Compliant - run() is not deprecated
 class MyThread extends Thread {
   override function run() { print("hello") }
+}
+```
+
+</details>
+<details>
+<summary>duplicate-null-check examples</summary>
+
+Flags a variable that is checked for null more than once in the same function body
+without an intervening reassignment.
+
+Repeated identical null checks on the same variable are almost always either a
+copy-paste error (the developer meant to check a different variable) or dead code
+(the second check can never have a different result).
+
+A `== null` and a `!= null` check on the same variable are treated as
+different operators and are not flagged - that pattern is a valid guard-then-assert idiom.
+A null check that follows a reassignment of the variable is also not flagged.
+
+```gosu
+// Noncompliant - item is checked twice without reassignment
+function process(item : MyItem) {
+  if (item == null) { return }
+  doWork(item)
+  if (item == null) { return }  // duplicate; item cannot have changed
+}
+
+// Compliant - only one null check
+function process(item : MyItem) {
+  if (item == null) { return }
+  doWork(item)
+}
+
+// Compliant - reassignment resets tracking
+function process(item : MyItem) {
+  if (item == null) { return }
+  item = fallback()
+  if (item == null) { return }  // OK; checking the new value
 }
 ```
 
@@ -1779,6 +1922,34 @@ if (GREETINGS.contains(greeting)) { ... }
 
 </details>
 <details>
+<summary>insecure-random examples</summary>
+
+Flags instantiation of `java.util.Random`.
+
+`java.util.Random` uses a linear congruential generator whose output is
+predictable given a few observed values. It must not be used for:
+
+  - Security tokens, session IDs, CSRF tokens, or any secret material
+  - Password generation or cryptographic key derivation
+  - Lottery / gambling / fair-draw scenarios
+
+Use `java.security.SecureRandom` instead. For high-throughput non-security
+randomness (e.g. load-balancing jitter), `java.util.concurrent.ThreadLocalRandom`
+is a faster alternative that at least avoids the shared-state contention of
+`java.util.Random`.
+
+```gosu
+// Noncompliant
+var rng = new Random()
+var token = rng.nextLong().toString(16)
+
+// Compliant
+var rng = new SecureRandom()
+var token = rng.nextLong().toString(16)
+```
+
+</details>
+<details>
 <summary>insecure-tls-trust examples</summary>
 
 Flags classes that implement `HostnameVerifier` or `X509TrustManager`,
@@ -1915,6 +2086,36 @@ function processPayment(amt : BigDecimal) {
   LOG.debug("Processing payment of " + amt)
   // ...
 }
+```
+
+</details>
+<details>
+<summary>malformed-string-interpolation examples</summary>
+
+Flags malformed string interpolation syntax in Gosu string literals.
+
+Three patterns are detected:
+
+  - **Unclosed ${** - an interpolation opening with no matching
+      closing brace.
+  - **Mismatched delimiter** - ${ closed with ] or
+      ) instead of a closing brace.
+  - **Bare $identifier** - $ followed directly by an
+      identifier name; the correct form wraps it in ${...}.
+
+```gosu
+// Noncompliant - bare $identifier; use $&#123;name} instead
+var msg = "Hello $name, welcome!"
+
+// Noncompliant - unclosed interpolation; missing closing brace
+var msg = "Value is $&#123;value"
+
+// Noncompliant - wrong closing delimiter; ) instead of closing brace
+var msg = "Result: $&#123;compute())"
+
+// Compliant - use string concatenation or correct $&#123;...} syntax
+var msg = "Hello " + name + ", welcome!"
+var msg = "Value is " + value
 ```
 
 </details>
@@ -2098,6 +2299,50 @@ class/method names change, and carry a measurable runtime overhead.
 
 </details>
 <details>
+<summary>regex-bad-pattern examples</summary>
+
+Flags regex patterns with structural problems that will cause runtime exceptions or
+catastrophic backtracking (ReDoS).
+
+Six checks are applied to string-literal arguments of `Pattern.compile()`,
+`str.matches()`, `str.replaceAll()`, and `str.replaceFirst()`:
+
+  - **Invalid character range** - e.g. `[a-Z]` (code point 97 &gt; 90) throws
+      `PatternSyntaxException` at runtime.
+  - **Nested quantifiers** - a quantified group whose content also contains a
+      quantifier, e.g. `(a+)+`, causes catastrophic backtracking (ReDoS).
+  - **Overly broad pattern** - a pattern that is entirely `.*` or `.+`
+      (with optional `^`/`$` anchors) matches everything and is almost certainly
+      a placeholder or copy-paste mistake.
+  - **Case flag conflict** - `CASE_INSENSITIVE` combined with a single-case
+      range like `[A-Z]` makes the explicit range redundant.
+  - **Ambiguous alternation** - alternatives in a quantified group where one is a
+      prefix of another, e.g. `(cat|catch)+`, cause catastrophic backtracking.
+  - **Chained wildcards** - three or more `.*` or `.+` in one pattern
+      force O(n^k) backtracking for near-miss inputs.
+
+```gosu
+// Noncompliant - invalid character range; throws PatternSyntaxException at runtime
+Pattern.compile("[a-Z]")
+
+// Noncompliant - nested quantifiers; catastrophic backtracking on certain inputs
+Pattern.compile("(a+)+")
+Pattern.compile("(\\w+\\s*)+")
+
+// Noncompliant - overly broad; matches every possible string
+Pattern.compile(".*")
+
+// Noncompliant - ambiguous alternation; (cat|catch)+ backtracks exponentially
+Pattern.compile("(cat|catch)+")
+
+// Compliant
+Pattern.compile("[a-zA-Z]")
+Pattern.compile("a+")
+Pattern.compile("[a-z]+(?:\\s+[a-z]+)*")
+```
+
+</details>
+<details>
 <summary>regex-compile-in-loop examples</summary>
 
 Detects regex compilation that repeats unnecessarily on every loop iteration.
@@ -2172,6 +2417,34 @@ class MyBuffer extends StringBuffer {
 
 </details>
 <details>
+<summary>system-exit examples</summary>
+
+Flags `System.exit()` calls.
+
+Calling `System.exit()` terminates the entire JVM process immediately.
+In application or library code this is almost always a mistake:
+
+  - It prevents the caller from handling shutdown gracefully.
+  - It makes unit testing impossible - the test runner is killed along with the code.
+  - In a container or application server the whole process dies, not just the one request.
+
+Prefer throwing an exception or returning an error code so the caller can decide
+how to handle the situation.
+
+```gosu
+// Noncompliant
+function shutdown() {
+  System.exit(1)
+}
+
+// Compliant
+function shutdown() {
+  throw new IllegalStateException("service is shutting down")
+}
+```
+
+</details>
+<details>
 <summary>thread-primitives examples</summary>
 
 Detects direct use of low-level threading primitives: `Thread`, `Runnable`,
@@ -2208,6 +2481,37 @@ Thread.currentThread()
 
 </details>
 <details>
+<summary>thread-sleep examples</summary>
+
+Flags `Thread.sleep()` calls.
+
+`Thread.sleep()` blocks the calling thread for a fixed duration.
+This is almost always the wrong tool:
+
+  - It ties up a thread that could be doing useful work.
+  - The actual wait is unpredictable - the thread may sleep longer than requested.
+  - It makes tests slow and brittle: a sleep long enough to be reliable in CI is
+      wasteful, and a sleep short enough to be fast is flaky.
+
+Prefer event-driven coordination: `Object.wait`/`notify`,
+`CountDownLatch`, `CompletableFuture`, or a scheduler.
+
+```gosu
+// Noncompliant - polling with sleep
+function waitForReady() {
+  while (!service.isReady()) {
+    Thread.sleep(500)
+  }
+}
+
+// Compliant - event-driven
+function waitForReady() {
+  service.awaitReady(5, TimeUnit.SECONDS)
+}
+```
+
+</details>
+<details>
 <summary>tomap-no-merge examples</summary>
 
 Detects `toMap()` calls that omit a merge function, which throws
@@ -2229,6 +2533,43 @@ items.stream().collect(Collectors.toMap(\i -> i.getId(), \i -> i))
 ```gosu
 items.stream().collect(Collectors.toMap(\i -> i.getId(), \i -> i, \a, b -> b))
 // merge function supplied - duplicate keys handled explicitly
+```
+
+</details>
+<details>
+<summary>tostring-misuse examples</summary>
+
+Flags `.toString()` calls on types that do not produce meaningful output.
+
+Three receiver categories are detected:
+
+  - **Arrays** - `array.toString()` returns a JVM identity string like
+      `[Ljava.lang.String;@1a2b3c4d`, not the array contents. Use
+      `Arrays.toString(arr)` or `Arrays.deepToString(arr)` for nested arrays.
+  - **Streams** - `stream.toString()` returns an opaque pipeline description,
+      not the elements. Collect to a list first.
+  - **Optional** - `optional.toString()` is an implementation detail
+      (`"Optional[value]"` or `"Optional.empty"`), not a user-facing format.
+      Use `.orElse(...)` or `.map(...).orElse(...)`.
+
+Types that properly override `toString()` - `String`, `List`,
+`Map`, and most domain objects - are not flagged.
+
+```gosu
+// Noncompliant - prints "[Ljava.lang.String;@1a2b3c4d"
+var names = new String[]{"Alice", "Bob"}
+print(names.toString())
+
+// Noncompliant - prints opaque stream description
+print(names.stream().toString())
+
+// Noncompliant - prints "Optional[Alice]" rather than the value
+print(maybeName.toString())
+
+// Compliant
+print(Arrays.toString(names))
+print(nameList)
+print(maybeName.orElse("unknown"))
 ```
 
 </details>
@@ -2291,6 +2632,67 @@ Usage: `--rule-config unguarded-log-call:allowCheapArgs=true,cheapTypes=java.uti
 
 Compound guard conditions such as `if (cond && log.isDebugEnabled())` are not
 recognized - the call inside will be reported as unguarded (false positive).
+
+</details>
+<details>
+<summary>unsafe-static-formatter examples</summary>
+
+Flags `static` fields whose type is a thread-unsafe formatter class.
+
+`SimpleDateFormat`, `DateFormat`, `DecimalFormat`, and
+`NumberFormat` are not thread-safe. Sharing a single instance across threads
+via a `static` field causes silent data corruption and race conditions under
+concurrent access.
+
+Prefer one of:
+
+  - Instance-level (non-static) formatters - one per object or created on demand.
+  - `ThreadLocal` if a static field is truly required.
+  - `java.time.format.DateTimeFormatter` - immutable and thread-safe by design.
+
+```gosu
+// Noncompliant - shared mutable formatter; data corruption under concurrent access
+static var _fmt : SimpleDateFormat = new SimpleDateFormat("yyyy-MM-dd")
+
+// Compliant - instance-level field
+var _fmt : SimpleDateFormat = new SimpleDateFormat("yyyy-MM-dd")
+
+// Compliant - ThreadLocal wrapper
+static var _fmt : ThreadLocal =
+  ThreadLocal.withInitial(\-> new SimpleDateFormat("yyyy-MM-dd"))
+
+// Compliant - DateTimeFormatter is immutable and thread-safe
+static var _fmt : DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+```
+
+</details>
+<details>
+<summary>xxe-unsafe-factory examples</summary>
+
+Flags `DocumentBuilderFactory.newInstance()` calls that are not protected by
+`setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)`.
+
+By default, `DocumentBuilderFactory` allows XML external entity (XXE) processing.
+An attacker who controls XML input can use XXE to:
+
+  - Read arbitrary files on the server (e.g. `/etc/passwd`)
+  - Perform server-side request forgery (SSRF)
+  - Cause denial of service via "billion laughs" entity expansion
+
+The fix is to enable secure processing on the factory before creating the builder:
+
+```gosu
+// Noncompliant - XXE enabled by default
+var factory = DocumentBuilderFactory.newInstance()
+var builder = factory.newDocumentBuilder()
+var doc = builder.parse(inputStream)
+
+// Compliant - secure processing disables external entities
+var factory = DocumentBuilderFactory.newInstance()
+factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+var builder = factory.newDocumentBuilder()
+var doc = builder.parse(inputStream)
+```
 
 </details>
 
