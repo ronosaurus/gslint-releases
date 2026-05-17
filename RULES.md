@@ -58,12 +58,6 @@ construct(foo : Foo) {
 **Note:** This rule only checks `this(...)` delegation calls,
 not `super(...)`, since parent constructors may have different signatures.
 
-**AST quirk:** `dfs.getInitializer()` returns non-null for every
-constructor - including those with no explicit delegation - because Gosu injects a
-synthetic implicit `super()` call. The check below uses
-`IConstructorFunctionSymbol` + `ISymbol.THIS` to distinguish a real
-`this(...)` call from the synthetic `super()`.
-
 </details>
 <details>
 <summary>dead-assignment examples</summary>
@@ -216,12 +210,17 @@ construct(name : String, value : int) {
 | `delegate-member-conflict` | Flags class methods that shadow delegate-synthesized forwarding methods. |
 | `duplicate-delegate` | Flags multiple delegate fields that represent the same interface. |
 | `final-type-bound` | Flags generic type parameters whose upper bound is a final class, making the parameter pointless. |
+| `forbidden-extension` | Flags classes that extend a final or SPI-sealed Java base class directly. |
 | `forbidden-imports` | Flags uses statements that import types from forbidden packages (supports wildcards like 'sun.*'). Requires 'packages' config key. *(disabled by default - activate with `--rules forbidden-imports`)* |
+| `forbidden-types` | Flags configured forbidden types in field/local declarations and direct instantiations. *(disabled by default - activate with `--rules forbidden-types`)* |
+| `hardcoded-crypto-key` | Flags string literals passed to SecretKeySpec, PBEKeySpec, DESedeKeySpec, or IvParameterSpec constructors. |
 | `logger-static` | Flags logger fields that are not static (should be shared across instances). |
 | `logger-string-arg` | Flags logger fields whose initializer passes a string literal argument (prefer class references or type tokens). |
+| `null-cipher` | Flags new NullCipher() instantiation - a no-op debugging stub that silently disables all encryption. |
 | `prefer-stringbuilder` | Flags StringBuffer usage; prefer StringBuilder which avoids unnecessary synchronization in single-threaded code. |
 | `public-field` | Flags public instance fields; prefer private fields with public getter/setter. |
 | `raw-type` | Flags use of raw generic types without type parameters (e.g., 'List' instead of 'List<T>'). |
+| `reusable-object-static` | Flags non-static class fields holding types that are expensive to construct and thread-safe, such as ObjectMapper or Pattern. |
 | `static-concurrent-map` | Flags static ConcurrentHashMap fields with no remove/clear call; entries accumulate forever in long-running servers. |
 | `static-hashmap` | Flags static HashMap/LinkedHashMap fields that are not thread-safe; prefer ConcurrentHashMap. |
 | `static-map-forbidden-type` | Flags static Map fields storing forbidden types (e.g., request-scoped entities, sessions); configurable via forbiddenTypes. |
@@ -322,6 +321,63 @@ function identity(val : T) : T { return val }
 // Compliant
 class Sorter> { ... }
 function sum(values : List) : Double { ... }
+```
+
+</details>
+<details>
+<summary>forbidden-extension examples</summary>
+
+Flags classes that directly extend a Java base class that is either final or
+uses the SPI (Service Provider Interface) pattern, where direct subclassing
+defeats the intended extension mechanism.
+
+For JCA/JCE/JSSE classes, extend the corresponding SPI base instead and
+register your implementation via the provider mechanism.
+
+Configuration: `--rule-config forbidden-extension:extraForbidden=FQN:guidance,...`
+Use `disableDefaults=true` to replace the built-in list entirely.
+
+```gosu
+// Noncompliant
+class MyDigest extends MessageDigest {
+  // should extend MessageDigestSpi and register as a JCA provider
+}
+
+// Compliant
+class MyDigest extends MessageDigestSpi {
+  // correct SPI extension point
+}
+```
+
+</details>
+<details>
+<summary>forbidden-types examples</summary>
+
+Flags configured forbidden types in declarations and direct instantiations.
+
+This is an opt-in architectural rule for projects that want a deny list of APIs or types
+that should not appear in normal application code, such as Java serialization streams,
+low-level security primitives, or framework-internal classes.
+
+Configuration:
+`--rule-config forbidden-types:forbiddenTypes=ObjectInputStream,ObjectOutputStream`
+
+Matching is substring-based, so the following all work:
+
+  - simple names: `ObjectInputStream`
+  - fully-qualified names: `java.io.ObjectInputStream`
+  - prefixes/packages: `java.io.Object`
+
+If no `forbiddenTypes` are configured, the rule exits early and does not
+participate in processing.
+
+```gosu
+// Noncompliant
+var stream : ObjectInputStream = null
+var out = new ObjectOutputStream(buffer)
+
+// Compliant
+var stream : InputStream = null
 ```
 
 </details>
@@ -454,6 +510,39 @@ Instead:
       (`typeLit.getType().getType()`) - this is the type as the parser first resolved
       it, before auto-parameterization may have replaced it.
   - If that type `isGenericType()`, the field is a raw generic declaration.
+
+</details>
+<details>
+<summary>reusable-object-static examples</summary>
+
+Flags non-static class fields whose type is a well-known reusable object - one that is
+expensive to construct and thread-safe by design (e.g. `ObjectMapper`, `Pattern`).
+Such objects should be declared `static` so they are created once and shared across
+all instances of the class rather than re-allocated on every construction.
+
+Configuration:
+
+  - `extraTypes` - additional types to flag (comma-separated FQNs or simple names)
+  - `disableDefaults=true` - replace the built-in list with only `extraTypes`
+  - `excludeAnnotations` - skip classes bearing any of these annotations
+      (comma-separated simple names, e.g. `Singleton,Plugin`)
+  - `excludeBaseClasses` - skip classes extending any of these base classes
+      (comma-separated simple names, e.g. `BasePlugin`)
+
+Types not in the built-in list but commonly worth adding via `extraTypes`:
+`ExecutorService`, `DataSource`, `Validator`.
+
+```gosu
+// Noncompliant
+class MyService {
+  var mapper : ObjectMapper = new ObjectMapper()
+}
+
+// Compliant
+class MyService {
+  static var mapper : ObjectMapper = new ObjectMapper()
+}
+```
 
 </details>
 <details>
@@ -728,50 +817,6 @@ var name = getRecord()?.Name ?: ""  // elvis fallback
 
 </details>
 <details>
-<summary>debug-only-catch examples</summary>
-
-Flags catch blocks that contain only `log.debug()` or `log.trace()` calls.
-
-Debug and trace logging is typically disabled in production, so a catch block that
-contains only these calls is functionally silent - identical to an empty catch block
-from a diagnostic perspective. The `empty-catch` rule does not fire on these
-because they contain a method call, but the exception is still effectively swallowed.
-
-### Flagged
-```gosu
-} catch (e : Exception) {
-  log.debug("parse failed: " + e.getMessage())  // VIOLATION: silent in production
-}
-```
-
-### Not flagged
-```gosu
-} catch (e : Exception) {
-  log.warn("parse failed", e)   // OK: warn/info/error visible in production
-}
-} catch (e : Exception) {
-  log.debug("rethrowing", e)
-  throw new RuntimeException(e) // OK: throw is meaningful regardless of log level
-}
-```
-
-### Detection
-
-A catch block is flagged when:
-
-  - It is not structurally empty (that is `empty-catch`'s responsibility).
-  - It contains at least one `log.debug()` or `log.trace()` call.
-  - It contains no production-meaningful statement: no throw, return,
-      assignment, or non-debug/trace method call. Variable declarations alone do not
-      count as meaningful (consistent with `empty-catch` semantics).
-
-Logger receivers are identified by the same two-pronged strategy used in
-`UnguardedLogCallRule`: resolved type name contains "log" (e.g.
-`org.slf4j.Logger` → simple name `Logger`), falling back to the
-receiver expression's text when the type is unresolved.
-
-</details>
-<details>
 <summary>empty-finally examples</summary>
 
 Detects empty `finally` blocks in Gosu source files.
@@ -805,51 +850,6 @@ try {
   parse()
 } finally {
   stream.close()
-}
-```
-
-</details>
-<details>
-<summary>exception-swallowed-in-finally examples</summary>
-
-Flags `return` or `throw` statements inside `finally` blocks.
-
-A `return` or `throw` in a `finally` block silently discards
-any exception propagating from the `try` or `catch` block. The original
-failure disappears with no trace, making bugs extremely hard to diagnose.
-
-```gosu
-// BAD - the IOException from the try block is silently discarded
-function readFile(path : String) : String {
-  try {
-    return FileUtil.readFile(path)  // throws IOException
-  } finally {
-    return ""                        // swallows the exception
-  }
-}
-```
-
-</details>
-<details>
-<summary>print-stack-trace examples</summary>
-
-Flags calls to `Throwable.printStackTrace()`, which writes the stack trace
-directly to `System.err` and bypasses any configured logging framework.
-
-In production code, stack traces should be passed to a logger so that they
-respect log-level configuration, go to the correct appender/sink, and are
-included in structured log output (e.g. JSON). Using `printStackTrace()`
-sends output to stderr regardless of whether debug logging is enabled.
-
-```gosu
-// Noncompliant
-} catch (e : Exception) {
-  e.printStackTrace()
-}
-
-// Compliant
-} catch (e : Exception) {
-  log.error("operation failed", e)
 }
 ```
 
@@ -911,16 +911,9 @@ var upper = words*.toUpperCase()
 var lower = upper*.toLowerCase()
 ```
 
-### Detection
-Two AST nodes represent `*.`:
-
-  - `IMemberExpansionExpression` - property expansion (`people*.Name`)
-  - `BeanMethodCallExpression` with `isExpansion()==true` - method expansion
-      (`words*.toUpperCase()`)
-
-A violation fires when either node's `getRootExpression()` is itself an expansion node.
-
-CLI token: `chained-expansion`
+A violation fires when a `*.` operator is applied to a value that
+is itself the result of another `*.` operator - covering both property
+expansion (`*.Name`) and method expansion (`*.toUpperCase()`).
 
 </details>
 <details>
@@ -943,11 +936,8 @@ return items*.transform()          // OK - result is returned
 Void expansion calls are out of scope here - they are handled by
 `ExpansionVoidCallRule` (`expansion-void-call`).
 
-Detection: `IBeanMethodCallStatement` whose inner expression is an
-expansion call (`isExpansion()==true`) with a non-`void` return type.
-ErrorType receivers are skipped (`getMethodDescriptor()==null`).
-
-CLI token: `expansion-result-unused`
+Calls whose target method cannot be resolved (unresolved/ErrorType receivers)
+are skipped conservatively to avoid false positives.
 
 </details>
 <details>
@@ -965,11 +955,8 @@ and the side-effect intent is clearer as an explicit loop:
 for (item in items) { item.process() }   // OK
 ```
 
-Detection: `IBeanMethodCallStatement` whose inner expression is an
-expansion call (`isExpansion()==true`) with a `void` return type.
-ErrorType receivers are skipped (`getMethodDescriptor()==null`).
-
-CLI token: `expansion-void-call`
+Calls whose target method cannot be resolved (unresolved/ErrorType receivers)
+are skipped conservatively to avoid false positives.
 
 </details>
 
@@ -1045,7 +1032,7 @@ the brace and the `else`, so no violation is reported.
 
 This approach handles all brace styles (K&amp;R, Allman) and all then-body
 shapes (single-statement, multi-statement, deeply nested compound statements)
-without depending on `IStatementList.getLastLine()` accuracy.
+without depending on AST line-number accuracy for the closing brace.
 
 </details>
 <details>
@@ -1174,28 +1161,6 @@ report it as a missed branch (0% branch coverage).
 <details>
 <summary>missing-braces examples</summary>
 
-to hide from RulesDocGenerator):
-
-Detection strategy:
-The Gosu parser strips curly braces from the AST; both braced and brace-free
-single-statement bodies produce the same node type. Detection uses source line
-numbers from the AST combined with raw source lines:
-
-  If body: check if any source line in the range [ifLine, thenLine] contains '{'.
-    thenLine is included because when the if condition spans multiple lines, the
-    opening '{' appears on the last condition line, which is what IStatementList.getLineNum()
-    returns. As a fallback, also checks for Allman-style braces: a standalone '{'
-    on the line immediately after the condition ends (using the condition expression's
-    line number to handle multi-line conditions).
-
-  Else body: check if any source line in the range [thenLine + 1, elseLine] contains '{'.
-    elseLine is included because when the else body is a StatementList, getLineNum()
-    returns the '} else {' line itself, not the first statement inside.
-
-Known limitation: a '{' character inside a string literal or comment on an otherwise
-brace-free line will cause a false negative. This is uncommon in practice.
-/
-/**
 Flags `if` and `else` branches that omit curly braces.
 
 Brace-free single-statement branches are a common source of bugs - the
@@ -1356,21 +1321,27 @@ while (!queue.empty()) { // OK: computed condition
 | `date-time-format` | Flags incorrect date/time format patterns (e.g., 'mm' instead of 'MM' for months). |
 | `deprecated-override` | Flags Gosu overrides of @Deprecated Java methods. |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
+| `dynamic-receiver` | Flags method calls, property accesses, and declarations whose type is dynamic.Dynamic - they bypass type-based lint and taint analysis. *(disabled by default - activate with `--rules dynamic-receiver`)* |
 | `exception-as-string` | Flags explicit 'e as String' casts on Throwable subtypes - use getMessage() or pass the exception to the logger directly. |
 | `explicit-gc` | Flags System.gc() and Runtime.getRuntime().gc() calls (the JVM should manage GC; explicit calls cause unpredictable pauses). |
+| `file-write` | Flags filesystem write operations that may fail on environments with restricted file-write access. |
 | `float-equality` | Flags == and != comparisons on float/double values; use an epsilon tolerance or BigDecimal instead. |
 | `foreach-modify` | Flags collection mutations on the same collection being iterated in a foreach loop. |
 | `format-arg-count` | Flags String.format() calls where placeholder count does not match argument count. |
 | `future-get` | Flags Future.get() calls with no timeout argument (blocks the thread indefinitely). |
-| `hardcoded-hex-token` | Flags long, high-entropy hex string literals that may be hardcoded secrets or tokens. |
+| `gson-unsafe-type-dispatch` | Flags custom Gson deserializers that read a JSON type label and resolve classes dynamically from it. |
+| `hardcoded-hex-token` | Flags string literals containing long, high-entropy runs that may be hardcoded secrets or tokens. |
 | `hardcoded-ip-address` | Flags string literals containing a hardcoded IPv4 or IPv6 address; use configuration instead. |
 | `hardcoded-line-separator` | Flags hardcoded \"\\n\", \"\\r\", or \"\\r\\n\" string literals; use System.lineSeparator() for portability. |
+| `hardcoded-uuid` | Flags string literals matching UUID shapes (canonical 8-4-4-4-12 dashed form or 32-char compact hex). |
 | `immutable-collection-null` | Flags null arguments passed to immutable collection factories ('List.of', 'Set.of', 'Map.of'). |
 | `indexed-removal` | Flags 'list.remove(i)' by index during for-each iteration (causes element skipping). |
 | `inline-collection-call` | Flags method calls made directly on an inline collection or map literal  |
 | `insecure-random` | Flags 'new java.util.Random()' - use SecureRandom for security-sensitive randomness. |
+| `insecure-tls` | Flags SSLContext.getInstance() requests for deprecated protocol versions (SSLv2, SSLv3, TLSv1, TLSv1.1). |
 | `insecure-tls-trust` | Flags classes implementing HostnameVerifier or X509TrustManager, which are commonly used to disable TLS validation. |
 | `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..\|). |
+| `jackson-default-typing` | Flags ObjectMapper.enableDefaultTyping() and activateDefaultTyping() calls that allow gadget-chain deserialization attacks. |
 | `java-final-override` | Flags Gosu overrides of final Java methods. |
 | `lock-not-in-finally` | Flags lock() calls in a try body whose finally block is missing or lacks unlock(); deadlock risk. |
 | `log-entry-exit` | Flags trace/debug entry and exit log calls at function boundaries. |
@@ -1378,6 +1349,7 @@ while (!queue.empty()) { // OK: computed condition
 | `manual-stream-copy` | Flags loops containing both read() and write() calls; use a stream copy utility instead. |
 | `map-returns-collection` | Flags 'map()' operations that return nested collections that could be flattened with 'flatMap()'. |
 | `null-to-empty-string` | Flags 'str != null ? str : \"\"' patterns; use 'str ?: \"\"' instead. |
+| `precision-loss-narrowing-cast` | Flags narrowing casts and implicit coercions to int/Integer from wider types (long, float, double, BigInteger, BigDecimal) that silently lose precision. |
 | `process-spawn` | Flags Runtime.exec() and new ProcessBuilder(...) calls (OS process spawning is fragile and a source of command-injection vulnerabilities). |
 | `redundant-size-check` | Flags redundant size comparisons that are always true or always false. |
 | `reflection-use` | Flags Java java.lang.reflect.* calls and Gosu TypeSystem.* calls that bypass compile-time type safety. |
@@ -1386,6 +1358,7 @@ while (!queue.empty()) { // OK: computed condition
 | `synchronized-method` | Flags 'synchronized' method modifiers; prefer explicit lock objects. |
 | `synchronized-override` | Flags Gosu overrides that silently drop synchronization from a Java synchronized method. |
 | `system-exit` | Flags 'System.exit()' calls (usually a mistake in library code). |
+| `system-property-env-scope` | Flags System.getProperty/getenv calls outside configured packages or classes. *(disabled by default - activate with `--rules system-property-env-scope`)* |
 | `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--rules thread-primitives`)* |
 | `thread-sleep` | Flags 'Thread.sleep()' calls (usually a mistake; use events or futures instead). |
 | `tomap-no-merge` | Flags 'toMap()' without a merge function on non-unique keys (throws exception at runtime). |
@@ -1393,6 +1366,7 @@ while (!queue.empty()) { // OK: computed condition
 | `unguarded-log-call` | Flags log.debug() and log.trace() calls not wrapped in isDebugEnabled()/isTraceEnabled() guards. |
 | `unsafe-static-formatter` | Flags static SimpleDateFormat/DateFormat fields; these are thread-unsafe and should be instance-level or use java.time.format.DateTimeFormatter. *(disabled by default - activate with `--rules unsafe-static-formatter`)* |
 | `xxe-unsafe-factory` | Flags DocumentBuilderFactory.newInstance() not followed by setFeature(FEATURE_SECURE_PROCESSING, true) - XML parsers are XXE-vulnerable by default. |
+| `zip-slip` | Flags ZipEntry.getName() used as a file path without canonicalization, enabling directory traversal via crafted ZIP archives. |
 
 <details>
 <summary>bigdecimal-constant examples</summary>
@@ -1576,6 +1550,34 @@ function process(item : MyItem) {
 
 </details>
 <details>
+<summary>dynamic-receiver examples</summary>
+
+Flags method calls, property accesses, and variable declarations whose type resolves
+to `dynamic.Dynamic`. In security-sensitive codebases, dynamic receivers can
+silently bypass type-based lint rules (taint analysis, forbidden-class checks) because
+the receiver's real class is erased to Gosu's dynamic-type singleton.
+
+Four locations are flagged independently:
+
+  - Class-level fields declared as `dynamic.Dynamic`
+  - Local variables (including those inside constructor bodies) declared as `dynamic.Dynamic`
+  - Method calls whose receiver resolves to `dynamic.Dynamic`
+  - Property/field accesses whose receiver resolves to `dynamic.Dynamic`
+
+```gosu
+// Noncompliant
+var obj : dynamic.Dynamic = new Dynamic()
+obj.exec(cmd)
+
+// Compliant
+var proc : Runtime = Runtime.getRuntime()
+proc.exec(cmd)
+```
+
+Token: `dynamic-receiver` (off by default; opt-in via `--rules dynamic-receiver`).
+
+</details>
+<details>
 <summary>exception-as-string examples</summary>
 
 Detects explicit casts of Exception/Throwable subtypes to String via the `as` operator.
@@ -1620,6 +1622,46 @@ rt.gc()                        // VIOLATION
 ### Not flagged
 ```gosu
 myObject.gc()   // custom method named gc() on a non-Runtime type
+```
+
+</details>
+<details>
+<summary>file-write examples</summary>
+
+Flags filesystem write operations that may fail on environments with restricted file access.
+
+Some deployment environments (cloud tenants, sandboxed containers, read-only runtimes)
+prohibit all filesystem writes, including writes to `/tmp`. Code that constructs a
+`FileWriter` or calls `Files.write()` compiles and passes tests on a developer
+workstation but fails at runtime with an `AccessControlException` or OS-level denial
+on a restricted host.
+
+The rule flags three groups of write entry points:
+
+  - JDK constructors: `FileWriter`, `FileOutputStream`,
+      `RandomAccessFile`
+  - JDK NIO / Guava `Files`: `write`, `writeString`,
+      `newBufferedWriter`, `newOutputStream`, `createTempFile`,
+      `copy`, `move`, `append`, `asByteSink`, `asCharSink`,
+      `touch`, `createTempDir`
+  - Apache Commons IO `FileUtils`: `writeStringToFile`,
+      `writeByteArrayToFile`, `writeLines`, `write`, `touch`,
+      `copyFile`, `copyDirectory`, `copyToDirectory`,
+      `copyURLToFile`, `moveFile`, `moveDirectory`,
+      `moveToDirectory`, `forceMkdir`, `forceMkdirParent`
+
+```gosu
+// Noncompliant
+function persist(data : String) {
+  new FileWriter("/tmp/cache.txt").write(data)
+  Files.writeString(Paths.get("/var/log/app.log"), data)
+  FileUtils.writeStringToFile(new File("/tmp/out.txt"), data)
+}
+
+// Compliant - delegate to an injected storage abstraction
+function persist(data : String) {
+  _storageService.write("cache", data)
+}
 ```
 
 </details>
@@ -1740,36 +1782,6 @@ var result = future.get(5, TimeUnit.SECONDS)
 
 </details>
 <details>
-<summary>hardcoded-hex-token examples</summary>
-
-Flags string literals that are purely hexadecimal, meet a minimum length, and have
-high Shannon entropy - a pattern consistent with hardcoded tokens, cryptographic IDs,
-or other secrets that should be externalized to configuration.
-
-Well-known magic constants like `DEADBEEF` (entropy ~2.15) or
-`cafebabe` (entropy ~2.25) are not flagged because their character
-distributions are far from random. Strings shorter than the minimum length or
-containing non-hex characters (including `"0x"` prefixes) are also excluded.
-
-Configurable via `--rule-config`:
-
-  - `minLength` - minimum hex string length to check (default: `8`)
-  - `entropyThreshold` - minimum Shannon entropy in bits/char to flag (default: `2.8`)
-
-```gosu
-// Noncompliant
-var token  = "a3f9b2c1"              // 8 hex chars, entropy 3.0
-var apiKey = "a3f9b2c1e4d70891"      // 16 hex chars, entropy ~3.75
-
-// Compliant
-var magic = "DEADBEEF"               // low entropy - known magic constant
-var x     = "dead"                   // below min-length
-var s     = "hello"                  // contains non-hex characters
-var h     = "0xDEAD"                 // 'x' disqualifies the hex pattern
-```
-
-</details>
-<details>
 <summary>hardcoded-ip-address examples</summary>
 
 Flags string literals that contain a hardcoded IPv4 or IPv6 address.
@@ -1813,6 +1825,30 @@ writer.write("done\r\n")
 // Compliant
 var lines = items.join(System.lineSeparator())
 writer.write("done" + System.lineSeparator())
+```
+
+</details>
+<details>
+<summary>hardcoded-uuid examples</summary>
+
+Flags string literals that look like UUIDs - either the canonical 8-4-4-4-12
+dashed form or the 32-char compact (no-dash) form. Useful in codebases that
+want hardcoded identifiers moved into configuration, fixtures, or constants
+named for their semantic role.
+
+Detection is structural, not entropy-based. Any literal whose value contains
+a substring matching either UUID shape is reported. There is no version
+filtering - v1/v3/v4/v5 are all matched - and 32-char hex digests (e.g. MD5)
+are indistinguishable from compact UUIDs and so are also flagged.
+
+```gosu
+// Noncompliant
+var canonical = "550e8400-e29b-41d4-a716-446655440000"
+var compact   = "550e8400e29b41d4a716446655440000"
+
+// Compliant
+var truncated = "550e8400-e29b-41d4"   // partial UUID, no full match
+var notHex    = "550e8400-XXXX-41d4-a716-446655440000"
 ```
 
 </details>
@@ -1922,61 +1958,24 @@ if (GREETINGS.contains(greeting)) { ... }
 
 </details>
 <details>
-<summary>insecure-random examples</summary>
+<summary>insecure-tls examples</summary>
 
-Flags instantiation of `java.util.Random`.
+Flags `SSLContext.getInstance()` called with a deprecated protocol version.
 
-`java.util.Random` uses a linear congruential generator whose output is
-predictable given a few observed values. It must not be used for:
-
-  - Security tokens, session IDs, CSRF tokens, or any secret material
-  - Password generation or cryptographic key derivation
-  - Lottery / gambling / fair-draw scenarios
-
-Use `java.security.SecureRandom` instead. For high-throughput non-security
-randomness (e.g. load-balancing jitter), `java.util.concurrent.ThreadLocalRandom`
-is a faster alternative that at least avoids the shared-state contention of
-`java.util.Random`.
+Protocol versions SSLv2, SSLv3, TLSv1, and TLSv1.1 have known cryptographic
+vulnerabilities (POODLE, BEAST, CRIME) and are deprecated by RFC 8996. Code that
+explicitly requests one of these protocols downgrades security regardless of the
+JVM's platform defaults. Use `TLSv1.2` or `TLSv1.3`.
 
 ```gosu
-// Noncompliant
-var rng = new Random()
-var token = rng.nextLong().toString(16)
+// Noncompliant - deprecated protocol versions
+SSLContext.getInstance("SSLv3")   // POODLE
+SSLContext.getInstance("TLSv1")   // BEAST / deprecated RFC 8996
+SSLContext.getInstance("TLSv1.1") // deprecated RFC 8996
 
 // Compliant
-var rng = new SecureRandom()
-var token = rng.nextLong().toString(16)
-```
-
-</details>
-<details>
-<summary>insecure-tls-trust examples</summary>
-
-Flags classes that implement `HostnameVerifier` or `X509TrustManager`,
-both of which are commonly overridden to disable TLS certificate and hostname
-validation - a critical security vulnerability.
-
-A custom `HostnameVerifier` that returns `true` unconditionally or
-a `X509TrustManager` with empty `checkServerTrusted` / `checkClientTrusted`
-methods will silently accept any certificate or hostname, making the TLS connection
-trivially vulnerable to man-in-the-middle attacks.
-
-```gosu
-// Noncompliant - accepts any hostname
-class TrustAllVerifier implements HostnameVerifier {
-  function verify(host : String, session : SSLSession) : boolean { return true }
-}
-
-// Noncompliant - accepts any certificate
-class TrustAllManager implements X509TrustManager {
-  function checkClientTrusted(chain : X509Certificate[], authType : String) {}
-  function checkServerTrusted(chain : X509Certificate[], authType : String) {}
-  function getAcceptedIssuers() : X509Certificate[] { return null }
-}
-
-// Compliant - use the system default trust manager
-var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-tmf.init(null)
+SSLContext.getInstance("TLSv1.2")
+SSLContext.getInstance("TLSv1.3")
 ```
 
 </details>
@@ -2191,6 +2190,34 @@ var display = name ?: ""
 
 </details>
 <details>
+<summary>precision-loss-narrowing-cast examples</summary>
+
+Flags narrowing casts and implicit coercions to `int`/`Integer` from wider
+numeric types that silently lose precision.
+
+Casting a `long`, `double`, `float`, `BigDecimal`, or
+`BigInteger` to `int` silently truncates or overflows the value. The Gosu
+compiler also inserts these coercions implicitly when a wider expression is assigned to
+an `int` variable or passed to an `int` parameter - no `as` keyword
+appears in source, making them especially easy to miss in code review.
+
+```gosu
+// Noncompliant - explicit narrowing cast
+var count : int = totalRows as int        // totalRows is long; overflows silently above 2^31
+var truncated : int = 1.9 as int          // loses fraction - result is 1, not 2
+
+// Noncompliant - implicit narrowing coercion
+var x : int = getLongValue()              // compiler inserts implicit as int
+processItem(computeOffset())              // computeOffset() returns long, param is int
+
+// Compliant - use safe conversion helpers
+var count : int = Math.toIntExact(totalRows)   // throws on overflow
+var rounded : int = Math.round(1.9f)            // explicit rounding
+var fromBd : int = bigDecVal.intValueExact()    // throws on fraction
+```
+
+</details>
+<details>
 <summary>process-spawn examples</summary>
 
 Detects code that spawns OS processes via `Runtime.exec()` or
@@ -2299,50 +2326,6 @@ class/method names change, and carry a measurable runtime overhead.
 
 </details>
 <details>
-<summary>regex-bad-pattern examples</summary>
-
-Flags regex patterns with structural problems that will cause runtime exceptions or
-catastrophic backtracking (ReDoS).
-
-Six checks are applied to string-literal arguments of `Pattern.compile()`,
-`str.matches()`, `str.replaceAll()`, and `str.replaceFirst()`:
-
-  - **Invalid character range** - e.g. `[a-Z]` (code point 97 &gt; 90) throws
-      `PatternSyntaxException` at runtime.
-  - **Nested quantifiers** - a quantified group whose content also contains a
-      quantifier, e.g. `(a+)+`, causes catastrophic backtracking (ReDoS).
-  - **Overly broad pattern** - a pattern that is entirely `.*` or `.+`
-      (with optional `^`/`$` anchors) matches everything and is almost certainly
-      a placeholder or copy-paste mistake.
-  - **Case flag conflict** - `CASE_INSENSITIVE` combined with a single-case
-      range like `[A-Z]` makes the explicit range redundant.
-  - **Ambiguous alternation** - alternatives in a quantified group where one is a
-      prefix of another, e.g. `(cat|catch)+`, cause catastrophic backtracking.
-  - **Chained wildcards** - three or more `.*` or `.+` in one pattern
-      force O(n^k) backtracking for near-miss inputs.
-
-```gosu
-// Noncompliant - invalid character range; throws PatternSyntaxException at runtime
-Pattern.compile("[a-Z]")
-
-// Noncompliant - nested quantifiers; catastrophic backtracking on certain inputs
-Pattern.compile("(a+)+")
-Pattern.compile("(\\w+\\s*)+")
-
-// Noncompliant - overly broad; matches every possible string
-Pattern.compile(".*")
-
-// Noncompliant - ambiguous alternation; (cat|catch)+ backtracks exponentially
-Pattern.compile("(cat|catch)+")
-
-// Compliant
-Pattern.compile("[a-zA-Z]")
-Pattern.compile("a+")
-Pattern.compile("[a-z]+(?:\\s+[a-z]+)*")
-```
-
-</details>
-<details>
 <summary>regex-compile-in-loop examples</summary>
 
 Detects regex compilation that repeats unnecessarily on every loop iteration.
@@ -2440,6 +2423,43 @@ function shutdown() {
 // Compliant
 function shutdown() {
   throw new IllegalStateException("service is shutting down")
+}
+```
+
+</details>
+<details>
+<summary>system-property-env-scope examples</summary>
+
+Restricts `System.getProperty(...)` and `System.getenv(...)` to configured packages/classes.
+
+Direct reads from JVM properties and environment variables are often intended to stay in a
+small bootstrap/configuration layer. Allowing them throughout the codebase makes tests harder,
+spreads deployment-specific concerns into business logic, and complicates future migration to
+injected configuration.
+
+This rule is project-specific and therefore disabled by default. Configure it with one or
+both of:
+
+  - `allowedPackages` - comma-separated glob patterns matched against the package name
+  - `allowedClasses` - comma-separated glob patterns matched against the enclosing class
+      name (fully-qualified and simple name are both checked)
+
+Optional:
+
+  - `methods=getProperty,getenv` to restrict which System APIs are checked
+      (default: both)
+
+```gosu
+// Noncompliant when only com.acme.config.* is allowed
+package com.acme.feature
+function loadFlag() : String {
+  return System.getenv("FEATURE_FLAG")
+}
+
+// Compliant
+package com.acme.config
+function loadFlag() : String {
+  return System.getenv("FEATURE_FLAG")
 }
 ```
 
@@ -2666,35 +2686,15 @@ static var _fmt : DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 ```
 
 </details>
-<details>
-<summary>xxe-unsafe-factory examples</summary>
 
-Flags `DocumentBuilderFactory.newInstance()` calls that are not protected by
-`setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)`.
+### security
 
-By default, `DocumentBuilderFactory` allows XML external entity (XXE) processing.
-An attacker who controls XML input can use XXE to:
-
-  - Read arbitrary files on the server (e.g. `/etc/passwd`)
-  - Perform server-side request forgery (SSRF)
-  - Cause denial of service via "billion laughs" entity expansion
-
-The fix is to enable secure processing on the factory before creating the builder:
-
-```gosu
-// Noncompliant - XXE enabled by default
-var factory = DocumentBuilderFactory.newInstance()
-var builder = factory.newDocumentBuilder()
-var doc = builder.parse(inputStream)
-
-// Compliant - secure processing disables external entities
-var factory = DocumentBuilderFactory.newInstance()
-factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
-var builder = factory.newDocumentBuilder()
-var doc = builder.parse(inputStream)
-```
-
-</details>
+| Token | Detects |
+|-------|---------|
+| `command-injection` | Detects function parameters that flow to Runtime.exec() or new ProcessBuilder() without sanitization. |
+| `log-injection` | Detects unsanitized HTTP request values flowing to log calls - enables log injection attacks via newline characters. |
+| `path-traversal` | Detects function parameters flowing to file-system operations without proper validation. |
+| `sql-injection` | Detects function parameters flowing to SQL execution without proper parameterization. |
 
 ### style
 
@@ -2716,7 +2716,7 @@ var doc = builder.parse(inputStream)
 | `indent-alignment` | Flags statements whose indentation is inconsistent with the majority of their siblings in the same block. |
 | `long-line` | Flags source lines exceeding the configured maximum length (default: 150 characters). |
 | `max-file-size` | Flags source files exceeding the configured maximum size (default: 200 KB). *(disabled by default - activate with `--rules max-file-size`)* |
-| `max-function-lines` | Flags functions or constructors whose source span exceeds the configured maximum (default: 75 lines). |
+| `max-function-lines` | Flags functions or constructors whose source span exceeds the configured maximum (default: 120 lines). |
 | `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--rules max-lines`)* |
 | `max-ncss` | Flags source files whose non-commenting source statement count  *(disabled by default - activate with `--rules max-ncss`)* |
 | `mutable-constant` | Flags static var fields with UPPER_SNAKE_CASE names that are not declared final. |
@@ -2727,9 +2727,11 @@ var doc = builder.parse(inputStream)
 | `print-statement` | Flags 'print' and 'println' statements; use a logging framework instead. |
 | `property-vs-method` | Flags trivial properties that should use Gosu's 'var X : T' shorthand. |
 | `regex-simplifiable` | Flags str.matches() or str.replaceAll() where a built-in String method (equals, contains, startsWith, endsWith, replace) would be clearer and safer. |
+| `stack-trace-in-template` | Flags Throwable.getStackTrace() / .StackTrace reads inside ${} - the array stringifies to garbage; pass the throwable to the logger instead. |
 | `string-plus-in-expansion` | Flags string concatenation (+) with a string literal inside ${} template expressions. |
 | `this-consistency` | Flags inconsistent use of 'this' qualifier on member access within a class. |
 | `undocumented-complex-function` | Flags functions whose cyclomatic complexity meets or exceeds minScore (default: 10)  *(disabled by default - activate with `--rules undocumented-complex-function`)* |
+| `void-in-string-template` | Flags void-returning calls inside ${} template interpolations - the interpolation will be empty. |
 
 <details>
 <summary>ambiguous-call-args examples</summary>
@@ -2956,18 +2958,18 @@ print("Total: " + counter)
 Flags indentation "hiccups" within function and constructor bodies.
 
 A hiccup is a statement whose leading whitespace differs from the majority of
-its siblings in the same block. The rule takes a majority vote across every statement
-in a given `IStatementList`: the most common leading-whitespace prefix is the
+its siblings in the same block. The rule takes a majority vote across every
+statement in the same block: the most common leading-whitespace prefix is the
 "expected" indent, and any statement that deviates from it is flagged.
 
 No particular indentation width is mandated - the rule only detects internal
 inconsistency within a single block. Each nested block (inside an `if`,
 `for`, `while`, etc.) is evaluated independently.
 
-Statement positions are resolved via `ParseTree.getOffset()` rather than
-`IStatement.getLineNum()`. Gosu's `getLineNum()` can misfire on compound
-statements (for/if/while/try), returning a line inside the statement body instead of
-the opening keyword line. Using the parse-tree offset avoids that quirk entirely.
+Statement positions are resolved by source offset rather than AST line
+number, because Gosu's reported line number can misfire on compound statements
+(for/if/while/try), returning a line inside the statement body instead of the
+opening keyword line.
 
 ### Flagged - one statement out of alignment
 ```gosu
@@ -3138,6 +3140,28 @@ property set Name(v : String) {
 
 </details>
 <details>
+<summary>stack-trace-in-template examples</summary>
+
+Flags references to `Throwable.getStackTrace()` or its property-style alias
+`.StackTrace` inside a string-template interpolation (`${`}).
+
+`getStackTrace()` returns `StackTraceElement[]`. Inserted into
+`${`}, the array stringifies to something like
+`[Ljava.lang.StackTraceElement;@1a2b3c` - it looks like real output but
+conveys nothing. The fix is to pass the exception to the logger as a second
+argument so the framework formats the trace.
+
+```gosu
+// Noncompliant
+log.error("Oh no, ${ex.StackTrace}")          // property sugar
+log.error("Oh no, ${ex.getStackTrace()}")     // explicit call
+
+// Compliant
+log.error("Oh no", ex)                        // logger formats the trace
+```
+
+</details>
+<details>
 <summary>string-plus-in-expansion examples</summary>
 
 Flags string concatenation (`+`) inside a template interpolation expression
@@ -3202,6 +3226,31 @@ would skew the majority vote. A tie (equal number of this-qualified and bare acc
 is not flagged.
 
 </details>
+<details>
+<summary>void-in-string-template examples</summary>
+
+Flags calls inside a string-template interpolation (`${`}) whose return type
+is `void`.
+
+The interpolation operator requires an expression that yields a value. A
+`void`-returning call inserted into `${`} runs for its side effect but
+contributes nothing to the rendered string, so the resulting log line or message
+silently drops whatever the developer expected to appear. This is especially
+dangerous around `ex.printStackTrace()`, where the trace ends up on
+`stderr` divorced from the log line that was meant to reference it.
+
+```gosu
+// Noncompliant
+log.error("Oh no, ${ex.printStackTrace()}")    // printStackTrace returns void
+print("Cleared: ${list.clear()}")              // clear() returns void
+
+// Compliant
+log.error("Oh no", ex)                         // pass throwable as logger argument
+list.clear()
+print("Cleared")
+```
+
+</details>
 
 ### vendor
 
@@ -3213,9 +3262,12 @@ is not flagged.
 | `cls01g-readonly-reference` | Flags reference properties without defensive copying to prevent external modification. |
 | `err01g-throw-generic` | Flags throwing generic 'Exception' instead of a specific exception type. |
 | `err01g-throw-string` | Flags throwing non-exception objects (strings, primitives) instead of exceptions. |
+| `err03g-sensitive-exception-exposure` | Flags catch blocks that expose raw exception data or preserve sensitive causes. |
+| `inj00g-string-query` | Flags SQL queries built with string concatenation or interpolation; use PreparedStatement with ? placeholders. |
 | `res00g-close-not-in-finally` | Flags resource close statements not in a 'finally' block or 'using' statement. |
 | `res00g-not-in-using` | Flags closeable resources not used in a 'using' statement or try-with-resources. |
 | `res00g-unsafe-close-in-finally` | Flags unsafe resource closing in finally blocks without null checks. |
+| `ser00g-unsafe-deserialization` | Flags ObjectInputStream.readObject() calls that lack an ObjectInputFilter allowlist, enabling gadget-chain RCE. |
 
 <details>
 <summary>cls01g-public-primitive-field examples</summary>
@@ -3390,6 +3442,70 @@ if (user.Age < 21) {
 
 </details>
 <details>
+<summary>err03g-sensitive-exception-exposure examples</summary>
+
+Flags catch blocks that expose raw exception details or preserve sensitive causes.
+
+ERR03-G is about keeping internal diagnostics internal. Catch blocks should log full
+details to restricted logs, but catch blocks should not print directly to stdout/stderr and
+should not preserve sensitive causes such as file-system, SQL, or resource lookup failures.
+
+```gosu
+try {
+  openFile(path)
+} catch (e : FileNotFoundException) {
+  print(e.getMessage())                                // Noncompliant
+  throw new IOException("Unable to retrieve file", e)  // Noncompliant
+}
+
+try {
+  openFile(path)
+} catch (e : IOException) {
+  log.error("open failed", e)
+  throw new IllegalArgumentException("Invalid file")   // Compliant
+}
+```
+
+Current detection focuses on high-signal patterns:
+
+  - `printStackTrace()` in a catch block
+  - `print`/`println`/console output in a catch block
+  - Direct rethrow of sensitive exception types
+  - Wrapping sensitive exception types while preserving the original cause
+
+</details>
+<details>
+<summary>inj00g-string-query examples</summary>
+
+Flags SQL queries constructed via string concatenation or interpolation,
+which allows SQL injection attacks.
+
+INJ00-G requires parameterized queries (`PreparedStatement`) so that
+user-supplied input is always treated as data, never as SQL syntax. Embedding
+input directly into a query string via `+` or `${...`} gives
+attackers the ability to alter query logic and bypass security checks. This
+applies both to `execute*` calls on a `Statement` and to
+`prepareStatement`/`prepareCall` calls on a `Connection` -
+the injection occurs at prepare time in the latter case.
+
+```gosu
+// Noncompliant - concatenation in executeQuery
+var rs = stmt.executeQuery("SELECT * FROM users WHERE name='" + username + "'")
+
+// Noncompliant - interpolation in executeQuery
+var rs = stmt.executeQuery("SELECT * FROM users WHERE name='${username}'")
+
+// Noncompliant - concatenation in prepareStatement (injection at prepare time)
+var ps = conn.prepareStatement("SELECT * FROM users WHERE name='" + username + "'")
+
+// Compliant - literal SQL with ? placeholders; user input via typed setter
+var ps = conn.prepareStatement("SELECT * FROM users WHERE name=?")
+ps.setString(1, username)
+var rs = ps.executeQuery()
+```
+
+</details>
+<details>
 <summary>res00g-close-not-in-finally examples</summary>
 
 Detects `close()` calls inside a `try` body that has no `finally` block.
@@ -3454,6 +3570,34 @@ reader.readLine()
 ```gosu
 using (var reader = new BufferedReader(new FileReader(path))) {
   reader.readLine()
+}
+```
+
+</details>
+<details>
+<summary>ser00g-unsafe-deserialization examples</summary>
+
+Flags deserialization of untrusted data via `ObjectInputStream.readObject()` or
+`readUnshared()` when no `ObjectInputFilter` is installed on the stream.
+
+SER00-G prohibits deserializing data from untrusted sources. Deserialization
+reconstructs arbitrary class instances from bytes, allowing attackers to exploit
+"gadget chains" in classes already on the JVM classpath and achieve remote code
+execution (RCE) or denial-of-service (DoS). If deserialization is unavoidable,
+an allowlist filter must be applied via `ObjectInputStream.setObjectInputFilter()`
+so that only known-safe classes can be instantiated.
+
+```gosu
+// Noncompliant - no filter applied before readObject()
+function deserialize(bytes : byte[]) : Object {
+  return new ObjectInputStream(new ByteArrayInputStream(bytes)).readObject()
+}
+
+// Compliant - allowlist filter restricts which classes can be deserialized
+function deserializeSafe(stream : InputStream) : Object {
+  var ois = new ObjectInputStream(stream)
+  ois.setObjectInputFilter(new MyAllowlistFilter())
+  return ois.readObject()
 }
 ```
 
