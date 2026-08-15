@@ -119,7 +119,7 @@ result was forgotten, e.g.:
 
 ```gosu
 // BUG: does work but returns original param
-function processNames(names : List) : List {
+function processNames(names : List<String>) : List<String> {
   var result = names.map(\n -> n.toUpperCase())  // work done
   return names   // VIOLATION: should be 'return result'
 }
@@ -140,11 +140,11 @@ The preferred alternatives are returning an empty collection or an empty array.
 
 ### Flagged - return type is List/array and body contains `return null`
 ```gosu
-function getItems() : List {
+function getItems() : List<String> {
   if (someCondition) {
     return null           // VIOLATION
   }
-  return new ArrayList()
+  return new ArrayList<String>()
 }
 
 function getValues() : String[] {
@@ -157,7 +157,7 @@ function getValues() : String[] {
 
 ### Not flagged - empty collection returned instead
 ```gosu
-function getItems() : List {
+function getItems() : List<String> {
   if (someCondition) {
     return Collections.emptyList()    // OK
   }
@@ -286,6 +286,10 @@ which causes the Gosu compiler to synthesize duplicate forwarding methods for
 all interface members. The last delegate wins, making the earlier one(s) dead code
 and a source of confusion.
 
+Delegates are grouped by the interface's fully-qualified name, not its simple name -
+two distinct interfaces that happen to share a simple name in different packages
+(`com.acme.billing.IFoo` vs. `com.acme.shipping.IFoo`) are not duplicates.
+
 ### Flagged
 ```gosu
 delegate _a represents IFoo
@@ -315,12 +319,12 @@ Interface bounds (`T extends Comparable`) and abstract class bounds
 
 ```gosu
 // Noncompliant
-class Processor { ... }
-function identity(val : T) : T { return val }
+class Processor<T extends String> { ... }
+function identity<T extends Integer>(val : T) : T { return val }
 
 // Compliant
-class Sorter> { ... }
-function sum(values : List) : Double { ... }
+class Sorter<T extends Comparable<T>> { ... }
+function sum<T extends Number>(values : List<T>) : Double { ... }
 ```
 
 </details>
@@ -362,7 +366,7 @@ low-level security primitives, or framework-internal classes.
 Configuration:
 `--rule-config forbidden-types:forbiddenTypes=ObjectInputStream,ObjectOutputStream`
 
-Matching is substring-based, so the following all work:
+Matching is substring-based by default, so the following all work:
 
   - simple names: `ObjectInputStream`
   - fully-qualified names: `java.io.ObjectInputStream`
@@ -370,6 +374,20 @@ Matching is substring-based, so the following all work:
 
 If no `forbiddenTypes` are configured, the rule exits early and does not
 participate in processing.
+
+### Hierarchy-aware matching (opt-in)
+
+By default, a subtype or interface-implementor whose own name does not contain a
+configured pattern is not flagged - `class MyDirectoryClient implements javax.naming.directory.DirContext`
+evades a ban on `javax.naming.directory.DirContext`
+because "MyDirectoryClient" never contains that substring. Set `checkHierarchy=true` to
+additionally flag any declaration/instantiation whose resolved type IS a configured
+type or a subtype/implementor of one, in addition to the existing substring match. Note the
+configured pattern must itself resolve to a real type for the hierarchy check to engage - a
+package prefix like `javax.naming` (with no trailing class name) never resolves via
+`TypeSystem.getByFullNameIfValid` and so only ever participates in the substring check,
+same as before this flag existed:
+`--rule-config forbidden-types:forbiddenTypes=javax.naming.directory.DirContext,checkHierarchy=true`
 
 ```gosu
 // Noncompliant
@@ -409,17 +427,6 @@ synchronization, making it faster in single-threaded code.
 
 Only flag `StringBuffer` - not `StringBuilder` - since StringBuilder
 is already the preferred type.
-
-### Detection strategy
-
-  - **Class-level fields** (via `.processVariable`): any field declared
-      with type `StringBuffer`.
-  - **Local variables** (within function/constructor bodies): any `var`
-      statement whose declared or inferred type is `StringBuffer`.
-  - **Standalone construction**: any `new StringBuffer(...)` expression
-      whose line is not already covered by a local variable declaration above
-      - catches `return new StringBuffer()` and argument-position usages without
-      double-reporting lines like `var buf : StringBuffer = new StringBuffer()`.
 
 ### Flagged
 ```gosu
@@ -488,28 +495,10 @@ private var _lookup : Map          // Noncompliant - raw Map
 
 ### Not flagged - properly parameterised or non-generic
 ```gosu
-private var _items : List  // OK - fully parameterised
+private var _items : List<String>  // OK - fully parameterised
 private var _name  : String        // OK - String is not a generic type
 private var _count : int           // OK - primitive
 ```
-
-### Detection strategy
-
-Uses the parse-tree approach rather than the type-system API alone, because the Gosu
-compiler auto-parameterizes raw types (e.g. raw `List` → `List`) via
-`TypeLord.deriveParameterizedTypeFromContext` before the symbol table is finalized.
-Relying solely on `isParameterizedType()` would therefore produce false negatives.
-
-Instead:
-
-  - Obtain the `ITypeLiteralExpression` from `IVarStatement.getTypeLiteral()`.
-  - Search its parse tree for an `ITypeParameterListClause` child. This clause is
-      created during parsing (before auto-parameterization) and is present only when the
-      programmer actually wrote `` in source.
-  - If no clause is found, retrieve the `IType` from the literal expression
-      (`typeLit.getType().getType()`) - this is the type as the parser first resolved
-      it, before auto-parameterization may have replaced it.
-  - If that type `isGenericType()`, the field is a raw generic declaration.
 
 </details>
 <details>
@@ -564,35 +553,35 @@ optional soft/weak references - all without changing the calling code significan
 ### Flagged
 ```gosu
 // No eviction anywhere in the class - entries accumulate forever
-static var _sessionCache : ConcurrentHashMap
-static var _typeIndex    : java.util.concurrent.ConcurrentHashMap
+static var _sessionCache : ConcurrentHashMap<String, Session>
+static var _typeIndex    : java.util.concurrent.ConcurrentHashMap<String, IType>
 ```
 
 ### Not flagged
 ```gosu
 // Non-static - bounded to the object's lifetime, not a shared global
-var _localCache : ConcurrentHashMap
+var _localCache : ConcurrentHashMap<String, Object>
 
 // Lookup-only: no put/compute/merge anywhere on this field - populated at
 // init time and never grown at runtime, so unbounded growth is impossible
-static var _codes : ConcurrentHashMap = buildCodes()
-private static function buildCodes() : ConcurrentHashMap {
-  var m = new ConcurrentHashMap()
+static var _codes : ConcurrentHashMap<String, Integer> = buildCodes()
+private static function buildCodes() : ConcurrentHashMap<String, Integer> {
+  var m = new ConcurrentHashMap<String, Integer>()
   m.put("A", 1)   // puts are on the local variable, not on _codes
   return m
 }
 function getCode(key : String) : Integer { return _codes.get(key) }
 
 // Static with remove() call somewhere in the class
-static var _tokenCache : ConcurrentHashMap
+static var _tokenCache : ConcurrentHashMap<String, Token>
 function invalidate(key : String) { _tokenCache.remove(key) }
 
 // Static with clear() - e.g. in a reset/shutdown method
-static var _stateMap : ConcurrentHashMap
+static var _stateMap : ConcurrentHashMap<String, Object>
 static function reset() { _stateMap.clear() }
 
 // Static with removeIf() - TTL-style purge
-static var _ttlMap : ConcurrentHashMap
+static var _ttlMap : ConcurrentHashMap<String, Long>
 static function purge() { _ttlMap.removeIf(\e -> isExpired(e.Value)) }
 ```
 
@@ -613,19 +602,19 @@ same `Map` API with full thread-safety and is the intended replacement.
 
 ### Flagged
 ```gosu
-static var CACHE : HashMap = new HashMap()        // static-hashmap
-static var INDEX : LinkedHashMap = new LinkedHashMap()  // static-hashmap
+static var CACHE : HashMap<String, String> = new HashMap<String, String>()        // static-hashmap
+static var INDEX : LinkedHashMap<String, Integer> = new LinkedHashMap<String, Integer>()  // static-hashmap
 ```
 
 ### Not flagged
 ```gosu
-static var CACHE : ConcurrentHashMap = new ConcurrentHashMap()
-var localCache : HashMap = new HashMap()  // instance field - not shared across threads
+static var CACHE : ConcurrentHashMap<String, String> = new ConcurrentHashMap<String, String>()
+var localCache : HashMap<String, String> = new HashMap<String, String>()  // instance field - not shared across threads
 ```
 
-Type resolution is `TypeResolution.HELPFUL`: when the declared
-type's FQN is available the match is exact, otherwise it falls back to the
-simple name so the rule still fires under partial classpaths.
+Type resolution is `TypeResolution.HELPFUL`: the match is by exact resolved FQN
+(or subtype) only - when the declared type does not resolve, the rule stays silent rather
+than guessing from the simple name.
 
 </details>
 <details>
@@ -641,16 +630,23 @@ request-scoped objects (entities, sessions, active database connections) can
 cause resource leaks. Local maps within functions are fine - they are destroyed
 when the function exits. Instance (non-static) maps are not flagged by this rule.
 
-Type matching is substring-based (uses `contains()`), so it handles:
+Type matching is substring-based by default (uses `contains()`), so it handles:
 
   - Exact type names: `forbiddenTypes=com.example.IEntity`
   - Package prefixes: `forbiddenTypes=com.example.entity` (matches all types in that package and sub-packages)
   - Simple name patterns: `forbiddenTypes=Entity` (matches UserEntity, BaseEntity, etc.)
 
-Limitation: Type matching is by name only, not by type hierarchy.
-If a type implements an interface that is in the forbidden list, it will only be
-flagged if its own name matches. To flag all implementations, add all concrete
-type names to the config.
+Default limitation: by default, type matching is by name only, not by
+type hierarchy. A subtype or interface-implementor whose own name doesn't match a configured
+pattern is not flagged - `UserEntity extends BaseEntity` stored as a Map value evades
+a ban on `BaseEntity` if "UserEntity" itself was never added to the config.
+
+### Hierarchy-aware matching (opt-in)
+
+Set `checkHierarchy=true` to additionally flag a Map key/value type that IS a
+configured type or a subtype/implementor of one, in addition to the existing substring match -
+no need to enumerate every concrete subtype in the config:
+`--rule-config static-map-forbidden-type:forbiddenTypes=com.example.BaseEntity,checkHierarchy=true`
 
 Disabled by default: This rule has no default forbidden types.
 It only fires when explicitly configured via `--rule-config`.
@@ -660,16 +656,16 @@ It only fires when explicitly configured via `--rule-config`.
 
 ### Flagged
 ```gosu
-static var cache : HashMap = new HashMap()        // value type 'IEntity' is forbidden
-static var index : ConcurrentHashMap = new ConcurrentHashMap()  // key type 'IEntity' is forbidden
-static var sessions : Map = new HashMap()  // value type matches 'HttpSession'
+static var cache : HashMap<String, IEntity> = new HashMap<String, IEntity>()        // value type 'IEntity' is forbidden
+static var index : ConcurrentHashMap<IEntity, String> = new ConcurrentHashMap<IEntity, String>()  // key type 'IEntity' is forbidden
+static var sessions : Map<String, HttpSession> = new HashMap<String, HttpSession>()  // value type matches 'HttpSession'
 ```
 
 ### Not flagged
 ```gosu
-static var cache : HashMap = new HashMap()  // no forbidden types
-var localMap : HashMap = new HashMap()  // not static - destroyed when function exits
-static var safe : ConcurrentHashMap = new ConcurrentHashMap()  // no forbidden types
+static var cache : HashMap<String, String> = new HashMap<String, String>()  // no forbidden types
+var localMap : HashMap<String, IEntity> = new HashMap<String, IEntity>()  // not static - destroyed when function exits
+static var safe : ConcurrentHashMap<String, Integer> = new ConcurrentHashMap<String, Integer>()  // no forbidden types
 ```
 
 Type resolution is `TypeResolution.HELPFUL`: when the type FQN is available
@@ -687,17 +683,6 @@ initial capacity. Since `char` widens silently to `int` on the JVM,
 passing a `char` literal or a `char`-typed expression compiles without error
 but produces an empty buffer whose initial capacity equals the character's Unicode
 code-point - not a buffer pre-loaded with that character.
-
-### Detection strategy
-
-For every `INewExpression` whose target type is `StringBuffer` or
-`StringBuilder`:
-
-  - If the sole argument is an `ICharLiteralExpression` (e.g. `'A'`),
-      flag it immediately - this is the most common form of the bug.
-  - Otherwise inspect the unwrapped argument expression's type; if it is `char`
-      or `java.lang.Character`, flag it - this catches `char`-typed
-      variable references that widen to `int`.
 
 ### Flagged
 ```gosu
@@ -744,7 +729,7 @@ Detects functions that declare more parameters than the configured limit.
 Functions with too many parameters are a code-smell: they typically indicate
 that the method is doing too much, or that a parameter object should be introduced.
 
-The default limit is {@value #DEFAULT_MAX_ARGS}. A custom limit can be supplied
+The default limit is 5. A custom limit can be supplied
 via the two-argument constructor.
 
 ### Not flagged (at default limit of 5)
@@ -781,6 +766,7 @@ count.
 | `debug-only-catch` | Flags catch blocks containing only debug/trace log calls, which are (usually) silent in production and equivalent to empty catches. |
 | `empty-catch` | Flags catch blocks with no statements (swallowed exceptions). |
 | `empty-finally` | Flags finally blocks with no meaningful statements. |
+| `exception-message-check` | Flags code that inspects exception message text (e.getMessage().contains(...)) - use specific exception subclasses or error codes instead. |
 | `exception-swallowed-in-finally` | Flags return or throw inside finally blocks that silently discard propagating exceptions. |
 | `print-stack-trace` | Flags Throwable.printStackTrace() calls; use a logging framework instead. |
 | `rethrow-catch` | Flags redundant 'catch'/'rethrow' patterns that should use 'throws' instead. |
@@ -850,6 +836,48 @@ try {
   parse()
 } finally {
   stream.close()
+}
+```
+
+</details>
+<details>
+<summary>exception-message-check examples</summary>
+
+Flags code that inspects the text of an exception message, e.g. via
+`e.getMessage().contains("timeout")` or `e.Message.startsWith("DB:")`.
+
+Exception message strings are not a stable API. They can change across library
+versions, differ by JVM vendor, or be localised. Branching on their content couples
+your code to an opaque implementation detail. The correct alternative is to catch a
+more specific exception subclass, check a structured error code on the exception, or
+ask the throwing code to surface the condition through a typed API.
+
+Flagged string-inspection methods: `contains`, `startsWith`,
+`endsWith`, `indexOf`, `lastIndexOf`, `matches`,
+`equals`, `equalsIgnoreCase`.
+
+Flagged message accessors: `getMessage()`, `getLocalizedMessage()`,
+`toString()` (Java-style calls) and the equivalent Gosu property forms
+`Message` and `LocalizedMessage`.
+
+```gosu
+// Noncompliant
+catch (e : Exception) {
+  if (e.getMessage().contains("timeout")) {
+    retry()
+  }
+}
+
+// Compliant - catch a specific subclass
+catch (e : SocketTimeoutException) {
+  retry()
+}
+
+// Compliant - use a structured error code on the exception
+catch (e : AppException) {
+  if (e.getErrorCode() == ErrorCode.TIMEOUT) {
+    retry()
+  }
 }
 ```
 
@@ -983,9 +1011,9 @@ are skipped conservatively to avoid false positives.
 <summary>blank-line-before-else examples</summary>
 
 Flags an `else` or `else if` clause that is separated from the closing
-{@code }} of its `if` body by one or more blank lines.
+`}` of its `if` body by one or more blank lines.
 
-A blank line between {@code }} and `else` visually disconnects the two
+A blank line between `}` and `else` visually disconnects the two
 halves of the conditional and suggests they are unrelated, making the code harder
 to follow. The `else` should either share the same line as the closing brace
 (K&amp;R style) or appear on the very next line (Allman style):
@@ -1019,21 +1047,6 @@ if (cond) {
 }
 ```
 
-### Detection
-
-Rather than relying on AST line numbers to find the closing {@code }} of the
-then-branch (which can misfire on compound statements like `try`), the rule
-scans the source backwards from the `else` keyword. It walks through
-blank lines until it hits the first non-blank line. If that line starts with
-{@code }}, the blank lines are between the closing brace and the `else` - a
-violation. If the first non-blank line is anything other than {@code }} (code,
-comments, etc.), the blank lines are inside the then-body, not between
-the brace and the `else`, so no violation is reported.
-
-This approach handles all brace styles (K&amp;R, Allman) and all then-body
-shapes (single-statement, multi-statement, deeply nested compound statements)
-without depending on AST line-number accuracy for the closing brace.
-
 </details>
 <details>
 <summary>complex-boolean examples</summary>
@@ -1041,7 +1054,7 @@ without depending on AST line-number accuracy for the closing brace.
 Flags boolean expressions with too many `and`/`or` operators.
 
 Each `and` or `or` operator in a single condition is counted.
-When the count exceeds {@value #DEFAULT_MAX_OPERATORS} the expression is
+When the count exceeds 3 the expression is
 flagged. The threshold is configurable via `configure(Map)` with key
 `"maxOperators"`, or via the CLI flag
 `--rule-config complex-boolean:maxOperators=2`.
@@ -1246,10 +1259,10 @@ Sibling to `complex-boolean`, which counts logical combinators
 i.e. how many distinct equality/relational tests a single condition
 performs. When a condition tests the same variable against N different
 values, that's a "switch-disguised-as-if" smell better expressed as
-`in { ... `}, a `switch`, or a lookup table.
+`in { ... }`, a `switch`, or a lookup table.
 
 Each comparison contributes 1 to the count regardless of how the
-sub-results are combined. {@value #DEFAULT_MAX_COMPARISONS} is the default
+sub-results are combined. 3 is the default
 threshold; override via `configure(Map)` with key
 `"maxComparisons"`, or via the CLI flag
 `--rule-config too-many-comparisons:maxComparisons=N`.
@@ -1319,7 +1332,8 @@ while (!queue.empty()) { // OK: computed condition
 | `concurrenthashmap-contains` | Flags unsafe use of '.contains()' instead of '.containsKey()' on ConcurrentHashMaps. |
 | `consecutive-log-calls` | Flags runs of 2+ consecutive same-level log calls on the same logger that should be merged into one. |
 | `date-time-format` | Flags incorrect date/time format patterns (e.g., 'mm' instead of 'MM' for months). |
-| `deprecated-override` | Flags Gosu overrides of @Deprecated Java methods. |
+| `deprecated-override` | Flags Gosu overrides of @Deprecated methods (Java, or Gosu with checkGosuDeprecated). |
+| `deprecated-usage` | Flags calls to or reads of @Deprecated methods or fields, or construction of @Deprecated classes. |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
 | `dynamic-receiver` | Flags method calls, property accesses, and declarations whose type is dynamic.Dynamic - they bypass type-based lint and taint analysis. *(disabled by default - activate with `--rules dynamic-receiver`)* |
 | `exception-as-string` | Flags explicit 'e as String' casts on Throwable subtypes - use getMessage() or pass the exception to the logger directly. |
@@ -1357,10 +1371,10 @@ while (!queue.empty()) { // OK: computed condition
 | `regex-compile-in-loop` | Flags Pattern.compile() and implicit regex compilation (matches/replaceAll/replaceFirst) inside loops. |
 | `synchronized-method` | Flags 'synchronized' method modifiers; prefer explicit lock objects. |
 | `synchronized-override` | Flags Gosu overrides that silently drop synchronization from a Java synchronized method. |
-| `system-exit` | Flags 'System.exit()' calls (usually a mistake in library code). |
+| `system-exit` | Flags 'System.exit()', 'Runtime.exit()' and 'Runtime.halt()' calls (usually a mistake in library code). |
 | `system-property-env-scope` | Flags System.getProperty/getenv calls outside configured packages or classes. *(disabled by default - activate with `--rules system-property-env-scope`)* |
 | `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--rules thread-primitives`)* |
-| `thread-sleep` | Flags 'Thread.sleep()' calls (usually a mistake; use events or futures instead). |
+| `thread-sleep` | Flags 'Thread.sleep()' and 'TimeUnit.sleep()' calls (usually a mistake; use events or futures instead). |
 | `tomap-no-merge` | Flags 'toMap()' without a merge function on non-unique keys (throws exception at runtime). |
 | `tostring-misuse` | Flags incorrect use of '.toString()' on arrays, streams, and optional objects. |
 | `unguarded-log-call` | Flags log.debug() and log.trace() calls not wrapped in isDebugEnabled()/isTraceEnabled() guards. |
@@ -1499,6 +1513,11 @@ inheritance level - a stronger coupling than simply calling the method. Consider
 the base class offers a non-deprecated replacement, or whether the Gosu class should use
 composition instead of inheritance.
 
+By default, only overrides of Java-declared `@Deprecated` methods are flagged - a
+Gosu method annotated `@Deprecated` on a Gosu supertype is not (Gosu-to-Gosu deprecation
+is a different concern). Set `checkGosuDeprecated=true` via `--rule-config` to also
+flag overrides of Gosu-declared `@Deprecated` methods.
+
 ```gosu
 // Noncompliant - Thread.stop() is deprecated
 class MyThread extends Thread {
@@ -1508,6 +1527,42 @@ class MyThread extends Thread {
 // Compliant - run() is not deprecated
 class MyThread extends Thread {
   override function run() { print("hello") }
+}
+```
+
+</details>
+<details>
+<summary>deprecated-usage examples</summary>
+
+Flags calls to or reads of a `@Deprecated` method or field, on any receiver - including
+one declared on an interface rather than a class - as well as constructing an instance of a
+`@Deprecated` class.
+
+`DeprecatedOverrideRule` only catches overriding a deprecated method; this rule
+catches the more common case of simply using one, e.g. `someList.method()` where
+`method` is declared `@Deprecated` on the `List` interface itself, not just
+on a concrete implementation.
+
+By default, only Java-declared `@Deprecated` methods, fields, and classes are
+flagged - a Gosu method, property, or class annotated `@Deprecated` is not (Gosu-to-Gosu
+deprecation is a different concern). Set `checkGosuDeprecated=true` via
+`--rule-config` to also flag calls to / reads of / construction of Gosu-declared
+`@Deprecated` members and classes.
+
+```gosu
+// Noncompliant - Thread.stop() is deprecated
+function stopIt(t : Thread) {
+  t.stop()
+}
+
+// Noncompliant - java.applet.Applet is @Deprecated at the class level
+function makeApplet() {
+  var a = new java.applet.Applet()
+}
+
+// Compliant - join() is not deprecated
+function joinIt(t : Thread) {
+  t.join()
 }
 ```
 
@@ -1702,7 +1757,7 @@ enclosing for-each loop cause ConcurrentModificationException.
 ### Flagged - modifying the iterable collection
 ```gosu
 function example() {
-  var list = new ArrayList(){"a", "b", "c"}
+  var list = new ArrayList<String>(){"a", "b", "c"}
   for (item in list) {
     if (item == "b") {
       list.remove(item)  // VIOLATION: modifying 'list' during iteration
@@ -1714,8 +1769,8 @@ function example() {
 ### Not flagged - modifying a different collection
 ```gosu
 function example() {
-  var source = new ArrayList(){"a", "b", "c"}
-  var toRemove = new ArrayList()
+  var source = new ArrayList<String>(){"a", "b", "c"}
+  var toRemove = new ArrayList<String>()
   for (item in source) {
     if (item == "b") {
       toRemove.add(item)  // OK: modifying 'toRemove', not 'source'
@@ -1768,9 +1823,9 @@ stuck forever with no way to recover. The correct form is
 `future.get(long, TimeUnit)`, which bounds the wait and lets the
 caller handle a `TimeoutException`.
 
-Covers all `Future` subtypes whose resolved type name contains
-`"Future"`: `java.util.concurrent.Future`,
-`CompletableFuture`, and Guava `ListenableFuture`.
+Covers all `java.util.concurrent.Future` subtypes by resolved type identity:
+`java.util.concurrent.Future` itself, `CompletableFuture`, and Guava
+`ListenableFuture`.
 
 ```gosu
 // Noncompliant - blocks forever if the future never completes
@@ -1890,7 +1945,7 @@ wrong element.
 ### Flagged - calling remove(i) where i is the for-each loop variable
 ```gosu
 function example() {
-  var list = new ArrayList(){"a", "b", "c"}
+  var list = new ArrayList<String>(){"a", "b", "c"}
   for (i in 0..|list.Count) {
     if (someCondition) {
       list.remove(i)  // VIOLATION: index shifts after removal
@@ -1902,7 +1957,7 @@ function example() {
 ### Not flagged - remove is outside the loop
 ```gosu
 function example() {
-  var list = new ArrayList(){"a", "b", "c"}
+  var list = new ArrayList<String>(){"a", "b", "c"}
   var idx = -1
   for (i in 0..|list.Count) {
     if (someCondition) {
@@ -1918,7 +1973,7 @@ function example() {
 ### Not flagged - remove argument is a different variable
 ```gosu
 function example() {
-  var list = new ArrayList(){"a", "b", "c"}
+  var list = new ArrayList<String>(){"a", "b", "c"}
   for (i in 0..|list.Count) {
     list.remove(0)  // OK: remove literal, not loop variable
   }
@@ -1941,7 +1996,7 @@ for (i in (list.Count - 1).downto(0)) {
 Flags method calls made directly on an inline collection or map literal.
 
 Gosu brace-literal syntax creates a new `List` (or `Map`) on every execution.
-When a method is called directly on that literal - `{"Hello","World"`.contains(greeting)} -
+When a method is called directly on that literal - `{"Hello","World"}.contains(greeting)` -
 the collection is allocated, used once, and discarded. This is wasteful and almost always
 indicates that the collection should be a named constant or, for membership checks, a
 constant `Set` for O(1) lookup.
@@ -1952,7 +2007,7 @@ if ({"Hello", "World"}.contains(greeting)) { ... }
 var n = {"a", "b", "c"}.size()
 
 // Compliant
-private static final Set GREETINGS = {"Hello", "World"} as Set
+private static final Set<String> GREETINGS = {"Hello", "World"} as Set<String>
 if (GREETINGS.contains(greeting)) { ... }
 ```
 
@@ -2012,12 +2067,12 @@ so this rule provides a reliable lint-time check.
 
 ```gosu
 // Noncompliant - if java.util.AbstractList.get() were final
-class MyList extends AbstractList {
+class MyList extends AbstractList<String> {
   override function get(i : int) : String { return "x" }
 }
 
 // Compliant - override a non-final method
-class MyList extends AbstractList {
+class MyList extends AbstractList<String> {
   override function size() : int { return 0 }
 }
 ```
@@ -2158,7 +2213,7 @@ with `flatMap`, or to explicitly call `.flatten()` on the result.
 
 ### Flagged
 ```gosu
-var nested = widgets.map(\w -> w.getItems())  // returns List> - never flattened
+var nested = widgets.map(\w -> w.getItems())  // returns List<List<String>> - never flattened
 ```
 
 ### Not flagged
@@ -2257,7 +2312,7 @@ Meaningful comparisons (`size() > 0`, `size() >= 1`, `size() == 0`) are not flag
 ### Flagged - always-true comparison
 ```gosu
 function example() {
-  var list = new ArrayList()
+  var list = new ArrayList<String>()
   if (list.size() >= 0) {  // VIOLATION: always true; size is never negative
     return true
   }
@@ -2267,7 +2322,7 @@ function example() {
 ### Flagged - always-false comparison
 ```gosu
 function example() {
-  var list = new ArrayList()
+  var list = new ArrayList<String>()
   if (list.size() < 0) {  // VIOLATION: always false; size is never negative
     return true
   }
@@ -2277,7 +2332,7 @@ function example() {
 ### Not flagged - meaningful comparison
 ```gosu
 function example() {
-  var list = new ArrayList()
+  var list = new ArrayList<String>()
   if (list.size() > 0) {  // OK: checks for non-empty; can be false
     return true
   }
@@ -2353,7 +2408,7 @@ for (item in items) {
 ```gosu
 private static final DIGITS = Pattern.compile("\\d+")  // compiled once
 
-function process(items : List) {
+function process(items : List<String>) {
   for (item in items) {
     if (DIGITS.matcher(item).matches()) { ... }   // OK
   }
@@ -2402,10 +2457,11 @@ class MyBuffer extends StringBuffer {
 <details>
 <summary>system-exit examples</summary>
 
-Flags `System.exit()` calls.
+Flags calls that terminate the JVM: `System.exit()`, `Runtime.exit()`,
+and `Runtime.halt()`.
 
-Calling `System.exit()` terminates the entire JVM process immediately.
-In application or library code this is almost always a mistake:
+All three terminate the entire JVM process immediately. In application or library code
+this is almost always a mistake:
 
   - It prevents the caller from handling shutdown gracefully.
   - It makes unit testing impossible - the test runner is killed along with the code.
@@ -2418,6 +2474,11 @@ how to handle the situation.
 // Noncompliant
 function shutdown() {
   System.exit(1)
+}
+
+// Noncompliant - Runtime.halt() is worse; it skips shutdown hooks entirely
+function shutdownHard() {
+  Runtime.getRuntime().halt(1)
 }
 
 // Compliant
@@ -2503,10 +2564,9 @@ Thread.currentThread()
 <details>
 <summary>thread-sleep examples</summary>
 
-Flags `Thread.sleep()` calls.
+Flags blocking sleep calls: `Thread.sleep()` and `TimeUnit.sleep()`.
 
-`Thread.sleep()` blocks the calling thread for a fixed duration.
-This is almost always the wrong tool:
+Both block the calling thread for a fixed duration. This is almost always the wrong tool:
 
   - It ties up a thread that could be doing useful work.
   - The actual wait is unpredictable - the thread may sleep longer than requested.
@@ -2522,6 +2582,11 @@ function waitForReady() {
   while (!service.isReady()) {
     Thread.sleep(500)
   }
+}
+
+// Noncompliant - TimeUnit.sleep() delegates to Thread.sleep() and blocks the same way
+function pause() {
+  TimeUnit.MILLISECONDS.sleep(500)
 }
 
 // Compliant - event-driven
@@ -2678,7 +2743,7 @@ static var _fmt : SimpleDateFormat = new SimpleDateFormat("yyyy-MM-dd")
 var _fmt : SimpleDateFormat = new SimpleDateFormat("yyyy-MM-dd")
 
 // Compliant - ThreadLocal wrapper
-static var _fmt : ThreadLocal =
+static var _fmt : ThreadLocal<SimpleDateFormat> =
   ThreadLocal.withInitial(\-> new SimpleDateFormat("yyyy-MM-dd"))
 
 // Compliant - DateTimeFormatter is immutable and thread-safe
@@ -2719,6 +2784,7 @@ static var _fmt : DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 | `max-function-lines` | Flags functions or constructors whose source span exceeds the configured maximum (default: 120 lines). |
 | `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--rules max-lines`)* |
 | `max-ncss` | Flags source files whose non-commenting source statement count  *(disabled by default - activate with `--rules max-ncss`)* |
+| `missing-newline-at-eof` | Flags source files that do not end with a newline character. *(disabled by default - activate with `--rules missing-newline-at-eof`)* |
 | `mutable-constant` | Flags static var fields with UPPER_SNAKE_CASE names that are not declared final. |
 | `nested-ternary` | Flags ternary expressions whose then/else branch is itself a ternary; use if/else blocks instead. |
 | `new-in-expansion` | Flags object allocation (new) inside ${} template expressions. |
@@ -2782,31 +2848,41 @@ var names = customers.map(\ item -> item.Name)
 
 Configurable via `--rule-config block-parameter-ignored:allowTypes=Type1,Type2.method`:
 
-  - `Type` - suppress for any method call on that receiver type
+  - `Type` - suppress for any method call on that receiver type (matched by
+      resolved type identity - an FQN matches exactly or by subtype, a bare simple
+      name matches the resolved type's relative name exactly)
   - `Type.method` - suppress only for that specific method
+
+Unresolved receivers never match an `allowTypes` entry - the suppression is
+type-identity based, not a rendered-name substring match, so it can't misfire on a
+domain type that merely contains the configured name as a fragment.
 
 </details>
 <details>
 <summary>call-in-expansion examples</summary>
 
-Flags direct function calls inside a template interpolation expression (`${`}).
+Flags direct function calls inside a template interpolation expression (`${}`).
 
-Bare function calls (calls without a receiver) inside string templates indicate
-processing logic buried in the template. Extract the call to a local variable
-before the template for clarity and easier debugging.
+Self-calls inside string templates indicate processing logic buried in the template.
+Extract the call to a local variable before the template for clarity and easier debugging.
+Both the bare form `processName(value)` and the explicitly qualified form
+`this.processName(value)` are flagged - they are the same call.
 
-Receiver-based calls like `name.trim()` or `list.size()` are allowed -
-only bare calls like `processName(value)` are flagged.
+Calls on some other receiver, like `name.trim()` or `list.size()`, are
+allowed: simple accessor and utility calls on objects are idiomatic inside templates.
 
 ```gosu
 // Noncompliant
 var msg = "Result: ${formatOutput(data)}"
 
+// Noncompliant - 'this.' does not change what the call does
+var msg = "Result: ${this.formatOutput(data)}"
+
 // Compliant
 var formatted = formatOutput(data)
 var msg = "Result: ${formatted}"
 
-// Compliant - receiver-based calls are fine
+// Compliant - calls on another receiver are fine
 var msg = "Name: ${name.trim()}"
 ```
 
@@ -2887,7 +2963,7 @@ Three locations are checked:
   - **Before a closing brace:** blank lines immediately preceding a closing brace.
   - **End of file:** trailing blank lines after the last non-empty line.
 
-The default limit is {@value #DEFAULT_MAX_BLANK_LINES} consecutive blank lines.
+The default limit is 3 consecutive blank lines.
 A custom limit can be supplied via the constructor or the `maxBlankLines` config key.
 
 ### Flagged
@@ -2895,11 +2971,15 @@ A custom limit can be supplied via the constructor or the `maxBlankLines` config
 function foo() {
   doSomething()
 
+
+
   doSomethingElse()  // ← four blank lines between statements
 }
 
 function bar() {
   doSomething()
+
+
 
 }  // ← also flagged before closing brace
 ```
@@ -2995,6 +3075,35 @@ peers to establish a reliable majority.
 
 </details>
 <details>
+<summary>missing-newline-at-eof examples</summary>
+
+Flags source files that do not end with a newline character.
+
+Most editors and POSIX tools (diff, cat, git) expect text files to end
+with a newline. A missing newline causes "No newline at end of file" noise
+in diffs and can confuse line-count tools.
+
+Works for both LF (`\n`) and CRLF (`\r\n`) line endings,
+since both terminate with `\n`. Empty files are not flagged.
+
+### Flagged
+```gosu
+class Foo {
+  function bar() : void { }
+}
+// ^ no newline here - file ends immediately after the closing brace
+```
+
+### Not flagged
+```gosu
+class Foo {
+  function bar() : void { }
+}
+// ^ file ends with a newline after this line
+```
+
+</details>
+<details>
 <summary>mutable-constant examples</summary>
 
 Flags `static var` fields whose name follows UPPER_SNAKE_CASE but are not
@@ -3049,7 +3158,7 @@ a single nesting level. Each additional nesting level produces one extra violati
 <summary>new-in-expansion examples</summary>
 
 Flags object allocation (`new`) inside a template interpolation expression
-(`${`}).
+(`${}`).
 
 Creating objects inside string templates hurts readability and makes
 debugging harder because the allocation is buried inside the string.
@@ -3143,10 +3252,10 @@ property set Name(v : String) {
 <summary>stack-trace-in-template examples</summary>
 
 Flags references to `Throwable.getStackTrace()` or its property-style alias
-`.StackTrace` inside a string-template interpolation (`${`}).
+`.StackTrace` inside a string-template interpolation (`${}`).
 
 `getStackTrace()` returns `StackTraceElement[]`. Inserted into
-`${`}, the array stringifies to something like
+`${}`, the array stringifies to something like
 `[Ljava.lang.StackTraceElement;@1a2b3c` - it looks like real output but
 conveys nothing. The fix is to pass the exception to the logger as a second
 argument so the framework formats the trace.
@@ -3165,10 +3274,10 @@ log.error("Oh no", ex)                        // logger formats the trace
 <summary>string-plus-in-expansion examples</summary>
 
 Flags string concatenation (`+`) inside a template interpolation expression
-(`${`}) when one operand is a string literal.
+(`${}`) when one operand is a string literal.
 
-Gosu string templates (`"Hello ${expr`"}) already handle interpolation.
-Embedding a `+` concatenation inside `${`} where one side is a literal
+Gosu string templates (`"Hello ${expr}"`) already handle interpolation.
+Embedding a `+` concatenation inside `${}` where one side is a literal
 is redundant - the literal can be moved outside the braces or inlined as a separate
 interpolation segment, making the template cleaner and more readable.
 
@@ -3229,11 +3338,11 @@ is not flagged.
 <details>
 <summary>void-in-string-template examples</summary>
 
-Flags calls inside a string-template interpolation (`${`}) whose return type
+Flags calls inside a string-template interpolation (`${}`) whose return type
 is `void`.
 
 The interpolation operator requires an expression that yields a value. A
-`void`-returning call inserted into `${`} runs for its side effect but
+`void`-returning call inserted into `${}` runs for its side effect but
 contributes nothing to the rendered string, so the resulting log line or message
 silently drops whatever the developer expected to appear. This is especially
 dangerous around `ex.printStackTrace()`, where the trace ends up on
@@ -3402,6 +3511,11 @@ superclasses like `RuntimeException`, `Exception`, `Throwable`,
 or `Error`. Generic exceptions prevent callers from catching and handling
 specific error conditions, making error diagnosis and recovery difficult.
 
+Matching is by resolved type identity against the exact FQN, not a name match and
+not a subtype check - a domain exception that extends `RuntimeException` (the
+normal pattern) is not flagged; only a direct `throw new RuntimeException(...)`
+(or `Exception`/`Throwable`/`Error`) is.
+
 ### Flagged - generic exception thrown
 ```gosu
 if (s == null) throw new RuntimeException("Null String")  // Noncompliant
@@ -3482,7 +3596,7 @@ which allows SQL injection attacks.
 
 INJ00-G requires parameterized queries (`PreparedStatement`) so that
 user-supplied input is always treated as data, never as SQL syntax. Embedding
-input directly into a query string via `+` or `${...`} gives
+input directly into a query string via `+` or `${...}` gives
 attackers the ability to alter query logic and bypass security checks. This
 applies both to `execute*` calls on a `Statement` and to
 `prepareStatement`/`prepareCall` calls on a `Connection` -
