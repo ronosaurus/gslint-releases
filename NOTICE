@@ -3,3 +3,108 @@ Copyright 2026 Ron Grabowski
 
 This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full license text.
+
+
+=======================================================================
+Third-party components distributed with gslint
+=======================================================================
+
+gslint itself declares only one runtime dependency, gosu-core. The
+components listed below are pulled in transitively through gosu-core-api.
+How they reach you depends on which artifact you use:
+
+  - The runnable ("uber") JAR - gslint-<version>-gosu-<gosu-version>.jar -
+    is assembled with the Maven Shade plugin, which copies these
+    components' compiled classes directly into that single JAR. They are
+    physically present in the artifact you receive.
+
+  - When gslint is used as a library (the thin gslint-<version>.jar), these
+    components are not inside that JAR; they are resolved by your build onto
+    your classpath as separate JARs, and you redistribute them.
+
+Either way these components remain governed by the licenses reproduced
+below, so their copyright and license notices are included here.
+
+Two of them are Guidewire's own repackaged "managed" builds of well-known
+libraries: ASM and JCommander are published under the
+org.gosu-lang.gosu.managed group as gw-asm-all and gw-jcommander, with
+their packages relocated under gw.internal.ext. Despite the renamed
+artifacts and relocated packages, they remain the ASM and JCommander
+projects and are licensed under the original ASM and JCommander terms
+shown below.
+
+The Manifold libraries (the systems.manifold group: manifold, manifold-rt,
+manifold-util) are a separate third-party project that gosu-core-api depends
+on directly; they too arrive only because gslint depends on gosu-core, not
+because gslint uses Manifold itself.
+
+Components (transitive through gosu-core):
+
+  org.gosu-lang.gosu:gosu-core             Apache-2.0
+  org.gosu-lang.gosu:gosu-core-api         Apache-2.0
+  org.gosu-lang.gosu.managed:gw-asm-all    ASM,        BSD-3-Clause
+  org.gosu-lang.gosu.managed:gw-jcommander JCommander, Apache-2.0
+  systems.manifold:manifold                Apache-2.0
+  systems.manifold:manifold-rt             Apache-2.0
+  systems.manifold:manifold-util           Apache-2.0
+
+
+-----------------------------------------------------------------------
+Gosu (gosu-core, gosu-core-api)
+Copyright 2014 Guidewire Software, Inc.
+
+Licensed under the Apache License, Version 2.0. The full license text is
+in the LICENSE file.
+-----------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------
+ASM - distributed here as org.gosu-lang.gosu.managed:gw-asm-all
+Copyright (c) 2000-2011 INRIA, France Telecom
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holders nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+THE POSSIBILITY OF SUCH DAMAGE.
+-----------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------
+JCommander - distributed here as org.gosu-lang.gosu.managed:gw-jcommander
+Copyright 2010 Cedric Beust
+
+Licensed under the Apache License, Version 2.0. The full license text is
+in the LICENSE file.
+-----------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------
+Manifold (manifold, manifold-rt, manifold-util)
+Copyright (c) Manifold Systems LLC
+
+Licensed under the Apache License, Version 2.0. The full license text is
+in the LICENSE file.
+-----------------------------------------------------------------------
