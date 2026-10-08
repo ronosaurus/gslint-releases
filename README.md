@@ -2,7 +2,7 @@
 
 Source-level static analysis for the [Gosu](https://gosu-lang.github.io/) programming language. Parses `.gs`, `.gsx`, `.gst`, and `.gsp` source files using the Gosu compiler's own AST API (`gw.lang.parser.*`) and reports violations in Text, JSON, SARIF.
 
-- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, 1.18.5, **1.18.7**, 1.18.8
+- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, 1.18.5, **1.18.7**, 1.18.8, 1.18.12
 - Gosu has been a stable language for over a decade so there should be flexibility with running a linter built for **1.18.7** against files designed for a previous version
 - Targets Java 11 bytecode for gosu-core parity; usable on JDK 11, 17, 21; peeked at upcoming 1.20.0-SNAPSHOT (JDK 25)
 
@@ -184,6 +184,9 @@ java -jar gslint.jar --include src --format json
 
 # SARIF - for GitHub Code Scanning, VS Code, and other SARIF consumers
 java -jar gslint.jar --include src --format sarif
+
+# Markdown - a PR-summary comment for GitHub or Bitbucket
+java -jar gslint.jar --include src --format markdown > out.md
 ```
 
 The linter's output goes to `stdout`, so pipe it into a file (`... > report.txt`) or into another processor such as `jq` when you need structured filtering or CI artifact capture.
@@ -318,11 +321,12 @@ java -jar gslint.jar --include src/ --additional-jars-file /tmp/dependencies.txt
 |------|-------------|---------|
 | `--rules <list>` | Comma-separated rule tokens (or fully-qualified class names) to run. Supports glob patterns: `manifold*`, `*expansion*` | All rules |
 | `--skip-rules <list>` | Comma-separated rule tokens to exclude. Supports glob patterns: `manifold*`, `*expansion*` | - |
+| `--enable-rules <list>` | Comma-separated rule tokens (globs allowed) to switch on even if disabled by default; combine with `--skip-rules` (a rule in both stays skipped) | - |
 | `--rules-only-custom` | Skip all built-in rules; use only with `--rules` to specify custom rules (incompatible with `--skip-rules`) | `false` |
 | `--enable-experimental-rules` | Enable experimental Manifold-awareness rules | `false` |
 | `--config <file>` | Properties file with rule configuration | - |
 | `--rule-config <str>` | Inline rule configuration (`rule:key=value;rule2:key=value`) | - |
-| `--format <fmt>` | Output format: `text`, `json`, `sarif` | `text` |
+| `--format <fmt>` | Output format: `text`, `json`, `sarif`, `intellij` (alias `idea`), `markdown` (alias `md`) | `text` |
 | `--init-src-root <path>` | Source root for Gosu runtime/type resolution. Required to properly resolve types and package structures. Can be specified multiple times for multiple roots. | - |
 | `--additional-jars-file <file>` | JAR paths for type resolution (one per line or semicolon-separated) | - |
 | `--include-generated` | Analyze `@Generated` classes (skipped by default) | `false` |
