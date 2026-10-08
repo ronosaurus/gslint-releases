@@ -11,9 +11,11 @@
 |-------|---------|
 | `ctor-delegation-param` | Flags constructor parameters not forwarded in explicit 'this(...)' delegation calls. |
 | `dead-assignment` | Flags variables assigned but never read before being overwritten or going out of scope. |
+| `dead-null-check` | Flags a null check on a variable that is already provably non-null - just constructed, or already guarded by an earlier early-return check. |
 | `identity-return` | Flags functions that perform work but return their input parameter unchanged. |
 | `null-return` | Flags functions that return 'null' directly; prefer 'Optional' or an empty collection. |
 | `unused-ctor-params` | Flags constructor parameters that are never read. |
+| `unused-private-member` | Flags private fields and functions that are never referenced within their top-level class. |
 
 <details>
 <summary>ctor-delegation-param examples</summary>
@@ -111,6 +113,66 @@ are not flagged to avoid false positives.
 
 </details>
 <details>
+<summary>dead-null-check examples</summary>
+
+Flags a `!= null` check on a local variable or parameter that is provably redundant
+because the variable was either just constructed with `new`, or was already guarded by an
+earlier `== null` check whose branch unconditionally returns or throws.
+
+### Flagged - checking a freshly-constructed value
+```gosu
+function example() {
+  var x = new Foo()
+  if (x != null) {     // VIOLATION: x was just constructed, cannot be null
+    x.doWork()
+  }
+}
+```
+
+### Flagged - checking after an early-return guard already proved non-null
+```gosu
+function example(item : Item) {
+  if (item == null) {
+    return
+  }
+  if (item != null) {   // VIOLATION: already known non-null after the guard above
+    item.doWork()
+  }
+}
+```
+
+### Not flagged - reassignment between the guard and the check
+```gosu
+function example(item : Item) {
+  if (item == null) {
+    return
+  }
+  item = maybeReplace(item)   // reassignment - item's nullness is unknown again
+  if (item != null) {         // OK - not redundant
+    item.doWork()
+  }
+}
+```
+
+### Not flagged - break/continue does not prove non-null for the rest of the function
+```gosu
+function example(items : List<Item>) {
+  for (item in items) {
+    if (item == null) {
+      continue   // only skips this iteration - does not make 'item' non-null afterward
+    }
+    if (item != null) {   // OK - not flagged; break/continue guards are out of scope
+      item.doWork()
+    }
+  }
+}
+```
+
+Fields are never tracked (any method call may reassign them), and neither is a local that
+some lambda in the function assigns to (calling the lambda may null it).
+
+</details>
+<details>
 <summary>identity-return examples</summary>
 
 Detects functions that accept a parameter, perform other work, and then return
@@ -198,6 +260,100 @@ construct(name : String, value : int) {
   this._value = value  // OK - both parameters used
 }
 ```
+
+</details>
+<details>
+<summary>unused-private-member examples</summary>
+
+Flags private fields and private functions that are declared but never read or called
+anywhere in the top-level class that contains them.
+
+### Flagged - private field never read
+```gosu
+class Example {
+  private var _cache : String     // VIOLATION: never referenced anywhere in the class
+
+  function doWork() : void {
+    print("done")
+  }
+}
+```
+
+### Flagged - only a different object's member of the same name is used
+```gosu
+class Example {
+  private function helper() : void { }   // VIOLATION: service.helper() is a different method
+
+  function doWork(service : Service) : void {
+    service.helper()
+  }
+}
+```
+
+### Not flagged - referenced from another member, in any form
+```gosu
+class Example {
+  private var _cache : String
+  private function helper() : void {
+    print("helping")
+  }
+
+  function doWork() : void {
+    this._cache = "value"   // OK - field is written
+    helper()                // OK - function is called (bare, no receiver)
+  }
+}
+```
+
+### Not flagged - a nested class's private member used by the enclosing class
+```gosu
+class Schedule {
+  static class Task {
+    var Done : boolean          // OK - fields are private by default, but Schedule reads it
+  }
+
+  function isDone(t : Task) : boolean {
+    return t.Done
+  }
+}
+```
+
+### Not flagged - class uses Gosu's dynamic-dispatch interceptors
+```gosu
+class Example {
+  private var _amount : Object   // OK - rule cannot see string-keyed access below,
+                                 // so the whole class is skipped
+
+  function $getProperty(name : String) : Object {
+    return _amount   // real usage is invisible to a static "collect all references" scan
+  }
+}
+```
+
+### Algorithm
+
+For each class, first checks whether it declares any of the six Gosu dynamic-dispatch
+interceptor methods (`$getProperty`, `$setProperty`, `$invokeMethod`, and
+their `Missing` counterparts). Those methods let a class read or write fields by a
+runtime string key (e.g. `_properties[name]`) - a pattern that produces no identifier
+or member-access node naming the real field anywhere in the AST. Since the rule cannot see
+that kind of access, the entire class is skipped when any of those methods is present. This
+pattern is rare in modern Gosu code, so it is documented as an unsupported case rather than
+gating the whole rule behind an experimental flag.
+
+Otherwise, it collects every private field (`IVarStatement.isPrivate()`) and every
+private function (`Modifier.isPrivate(dfs.getModifiers())`) declared directly on the
+class. Fields that back a property (`as Name`, or the field Gosu synthesizes for a
+`property get Name : T { ... }`) are skipped - they are read through the property.
+
+References are gathered from the whole top-level class and every class nested in it,
+because private members are visible anywhere inside that nest. Every reference is resolved to
+the class that actually declares the member: `other.helper()` or `other._cache`
+on a different type does not count, and a call is matched to the exact overload it targets.
+A bare name that is not a local variable or parameter counts for the class it is written in
+and the classes enclosing it. A private property accessor counts as used when its property is
+referenced. A declared private member with no matching reference is flagged at its
+declaration line.
 
 </details>
 
@@ -400,6 +556,32 @@ var stream : InputStream = null
 
 </details>
 <details>
+<summary>hardcoded-crypto-key examples</summary>
+
+Flags hardcoded string literals passed directly to cryptographic key construction APIs.
+
+A hardcoded cryptographic key or IV embedded in source code is exposed to anyone
+with access to the compiled JAR or repository history. There is no legitimate production
+use of a string literal as a key - keys must be loaded from a secrets manager, key store,
+or environment configuration at runtime.
+
+Targeted key-spec constructors: `SecretKeySpec`, `DESedeKeySpec`,
+`IvParameterSpec`, `PBEKeySpec`.
+
+```gosu
+// Noncompliant - key embedded as a string literal
+function aesKeyFail() : SecretKeySpec {
+  return new SecretKeySpec("mysupersecretkey16".getBytes(), "AES")
+}
+
+// Compliant - key loaded from external source
+function aesKeyPass(keyBytes : byte[]) : SecretKeySpec {
+  return new SecretKeySpec(keyBytes, "AES")
+}
+```
+
+</details>
+<details>
 <summary>logger-string-arg examples</summary>
 
 Flags logger fields whose initializer passes a string literal anywhere in its call chain.
@@ -412,6 +594,25 @@ var _logger = MyFramework.LOGIN.createSubLogger("LoginHelper")
 
 // Compliant - class reference used instead
 var _logger = MyFramework.LOGIN.createSubLogger(LoginHelper)
+```
+
+</details>
+<details>
+<summary>null-cipher examples</summary>
+
+Flags instantiation of `javax.crypto.NullCipher`, a no-op cipher that performs
+no encryption and has no legitimate production use.
+
+`NullCipher` extends `Cipher` and passes data through without modification.
+It is intended only for testing cipher pipeline wiring. Any code that constructs a
+`NullCipher` in non-test code silently disables all encryption on that path.
+
+```gosu
+// Noncompliant - no encryption performed
+var cipher = new NullCipher()
+
+// Compliant - use a real cipher
+var cipher = Cipher.getInstance("AES/GCM/NoPadding")
 ```
 
 </details>
@@ -803,6 +1004,51 @@ var name = getRecord()?.Name ?: ""  // elvis fallback
 
 </details>
 <details>
+<summary>debug-only-catch examples</summary>
+
+Flags catch blocks that contain only `log.debug()` or `log.trace()` calls.
+
+Debug and trace logging is typically disabled in production, so a catch block that
+contains only these calls is functionally silent - identical to an empty catch block
+from a diagnostic perspective. The `empty-catch` rule does not fire on these
+because they contain a method call, but the exception is still effectively swallowed.
+
+### Flagged
+```gosu
+} catch (e : Exception) {
+  log.debug("parse failed: " + e.getMessage())  // VIOLATION: silent in production
+}
+```
+
+### Not flagged
+```gosu
+} catch (e : Exception) {
+  log.warn("parse failed", e)   // OK: warn/info/error visible in production
+}
+} catch (e : Exception) {
+  log.debug("rethrowing", e)
+  throw new RuntimeException(e) // OK: throw is meaningful regardless of log level
+}
+```
+
+### Detection
+
+A catch block is flagged when:
+
+  - It is not structurally empty (that is `empty-catch`'s responsibility).
+  - It contains at least one `log.debug()` or `log.trace()` call.
+  - It contains no production-meaningful statement: no throw, return,
+      assignment, or non-debug/trace method call. Variable declarations alone do not
+      count as meaningful (consistent with `empty-catch` semantics).
+
+Logger receivers are identified by the same strategy used in `UnguardedLogCallRule`:
+the resolved receiver type's name is split on camelCase and underscore boundaries, and one of
+those words must be "log", "logger" or "logging". So `org.slf4j.Logger` matches while
+`Dialog`, `ProductCatalog` and `Backlog` do not. Only when the type fails to
+resolve is the receiver expression's text tested the same way.
+
+</details>
+<details>
 <summary>empty-finally examples</summary>
 
 Detects empty `finally` blocks in Gosu source files.
@@ -878,6 +1124,53 @@ catch (e : AppException) {
   if (e.getErrorCode() == ErrorCode.TIMEOUT) {
     retry()
   }
+}
+```
+
+</details>
+<details>
+<summary>exception-swallowed-in-finally examples</summary>
+
+Flags `return` or `throw` statements inside `finally` blocks.
+
+A `return` or `throw` in a `finally` block silently discards
+any exception propagating from the `try` or `catch` block. The original
+failure disappears with no trace, making bugs extremely hard to diagnose.
+
+```gosu
+// BAD - the IOException from the try block is silently discarded
+function readFile(path : String) : String {
+  try {
+    return FileUtil.readFile(path)  // throws IOException
+  } finally {
+    return ""                        // swallows the exception
+  }
+}
+```
+
+</details>
+<details>
+<summary>print-stack-trace examples</summary>
+
+Flags calls to `Throwable.printStackTrace()`, which writes the stack trace
+directly to `System.err` and bypasses any configured logging framework. The
+receiver must resolve to `java.lang.Throwable` (or a subtype) - a domain type
+that happens to define its own `printStackTrace()` method is not flagged.
+
+In production code, stack traces should be passed to a logger so that they
+respect log-level configuration, go to the correct appender/sink, and are
+included in structured log output (e.g. JSON). Using `printStackTrace()`
+sends output to stderr regardless of whether debug logging is enabled.
+
+```gosu
+// Noncompliant
+} catch (e : Exception) {
+  e.printStackTrace()
+}
+
+// Compliant
+} catch (e : Exception) {
+  log.error("operation failed", e)
 }
 ```
 
@@ -1001,8 +1294,10 @@ are skipped conservatively to avoid false positives.
 | `logical-or-style` | Flags inconsistent spacing or style around logical OR ('\|\|') operators. |
 | `missing-braces` | Flags 'if'/'for'/'while' bodies not wrapped in braces (can cause statement-merging bugs). |
 | `prefer-safe-navigation` | Flags null-guard chains that can be simplified using Gosu's '?.' safe-navigation operator. |
+| `redundant-condition` | Flags 'if' conditions that always evaluate the same way, or boolean comparisons that can be simplified. |
 | `single-case-switch` | Flags switch statements with only one case clause - replace with an if statement. |
 | `switch-default` | Flags 'switch' statements missing a 'default' branch. |
+| `switch-exhaustiveness-check` | Flags a switch over an enum that omits both a default clause and one or more enum constants. |
 | `too-many-comparisons` | Flags conditions with too many comparison operators (default threshold: 3). |
 | `too-many-returns` | Flags functions with more than the configured number of 'return' statements (default: 5). |
 | `while-literal-condition` | Flags while(true) (infinite loop) and while(false) (dead code) loop conditions. |
@@ -1016,7 +1311,7 @@ Flags an `else` or `else if` clause that is separated from the closing
 A blank line between `}` and `else` visually disconnects the two
 halves of the conditional and suggests they are unrelated, making the code harder
 to follow. The `else` should either share the same line as the closing brace
-(K&amp;R style) or appear on the very next line (Allman style):
+(K&R style) or appear on the very next line (Allman style):
 
 ### Flagged
 ```gosu
@@ -1062,6 +1357,16 @@ flagged. The threshold is configurable via `configure(Map)` with key
 Checked statement types: `if` / `else if`, `while`, `do-while`,
 `switch` (discriminant), `return`, local `var` initializers, and
 assignment statements.
+
+Exemption: a condition that is nothing but a flat chain of named flags, all joined by the
+same operator (`and` only, or `or` only), is not counted, up to
+8 operands (configurable with key `"maxBareOperands"`;
+0 turns the exemption off). Each flag may be negated with `not`. This rewards the
+recommended fix below. Mixed `and`/`or` chains are still counted.
+```gosu
+// Compliant - every operand is already a named flag
+if (isActive and hasQuota and not isLocked and isOwned and isVerified) { ... }
+```
 
 Example violation (6 operators):
 ```gosu
@@ -1208,6 +1513,92 @@ if (product != null && product.getPrice() != null && product.getPrice().Amount >
 if (product?.Price?.Amount > 0)
 ```
 
+### Only flagged when the rewrite is equivalent
+
+The original chain is `false` when the variable is null. After the rewrite the leaf
+sees a null instead, so the suggestion is only made for leaves that turn null into
+`false`: a bare boolean call (`foo.isActive()`), a relational compare
+(`foo.Count > 0`), `foo.x != null`, and `foo.x ==` a literal or primitive
+value (for example `foo.Name == "x"`, `foo.isActive() == false`,
+`foo.Count == 0`). Leaves such as `not foo.isNull()` or `foo.Name != "x"` are NOT flagged, because
+the `?.` form evaluates to `true` for a null `foo`.
+
+```gosu
+// Noncompliant (rewrite to foo?.Count > 0 keeps the same result)
+if (foo != null && foo.Count > 0)
+
+// Compliant (the ?.-rewrite would flip the result when foo is null)
+if (foo != null && not foo.isNull())
+if (foo != null && foo.Name != "x")
+```
+
+</details>
+<details>
+<summary>redundant-condition examples</summary>
+
+Flags `if` conditions that are provably redundant: conditions that always evaluate to the
+same value, or comparisons that can be simplified without changing behavior.
+
+### Flagged - constant condition
+```gosu
+if (true) {           // VIOLATION: always true
+  doWork()
+}
+
+if (1 == 1) {          // VIOLATION: compile-time constant, always true
+  doWork()
+}
+```
+
+A condition that is only a named constant (`if (DEBUG)`, `if (!Config.DEBUG)`)
+is NOT flagged by default, since that is the usual feature-flag pattern.
+
+### Flagged - comparing a variable to itself
+```gosu
+function check(count : int) {
+  if (count == count) {   // VIOLATION: always true for a non-floating primitive
+    doWork()
+  }
+}
+```
+
+### Flagged - redundant boolean-literal comparison
+```gosu
+if (flag == true) {    // VIOLATION: simplify to 'if (flag)'
+  doWork()
+}
+
+if (flag != false) {   // VIOLATION (flag : boolean): simplify to 'if (flag)'
+  doWork()
+}
+```
+
+For a boxed `Boolean`, `flag != false` and `flag == false` are NOT flagged:
+a null Boolean counts as false in `if (flag)` but not in `flag != false`, so the
+"simplified" form would handle null differently. `flag == true` and
+`flag != true` are still flagged, because their rewrites treat null the same way.
+
+### Not flagged - ordinary conditions, and floating-point self-comparison
+```gosu
+if (count > 0) { doWork() }
+
+function check(ratio : double) {
+  // NOT flagged: NaN != NaN, so 'ratio == ratio' is not provably always true
+  if (ratio == ratio) { doWork() }
+}
+```
+
+The negation-producing half of sub-check 3 (`flag == false` / `flag != true`,
+which simplify to `!flag`) can be opted out of via `configure(Map)` with key
+`"allowExplicitFalseComparison"`, or via the CLI flag
+`--rule-config redundant-condition:allowExplicitFalseComparison=true` - for teams that
+deliberately prefer the spelled-out comparison so a leading `!` isn't missed at a glance.
+The non-negating half (`flag == true` / `flag != false`, which simplify to just
+`flag`) is always flagged regardless of this setting.
+
+Named-constant conditions (`if (DEBUG)`) can be flagged again with
+`--rule-config redundant-condition:flagNamedConstants=true`.
+
 </details>
 <details>
 <summary>single-case-switch examples</summary>
@@ -1244,6 +1635,52 @@ switch (code) {         // OK: two or more cases
 
 switch (code) {         // OK: default-only switch (no case clauses at all)
   default: doSomething()
+}
+```
+
+</details>
+<details>
+<summary>switch-exhaustiveness-check examples</summary>
+
+Flags a `switch` statement over an enum-typed expression that covers neither every enum
+constant nor supplies a `default` clause.
+
+A switch that falls through both of those safety nets silently does nothing when a new enum
+constant is added later - the compiler gives no warning, and the missing branch only shows up
+as a bug report once someone hits it at runtime. Requiring either full coverage or an explicit
+`default` makes that gap visible at review time instead.
+
+A switch that already has a `default` clause is out of scope for this rule - handling
+unmatched values explicitly is exactly what `default` is for, and duplicating that check
+here would just repeat `SwitchDefaultRule`'s job.
+
+```gosu
+enum Status { ACTIVE, PAUSED, CLOSED }
+
+// Noncompliant - CLOSED is never handled, and there is no default to catch it
+switch (status) {
+  case ACTIVE:
+    doActive()
+  case PAUSED:
+    doPaused()
+}
+
+// Compliant - every constant is covered
+switch (status) {
+  case ACTIVE:
+    doActive()
+  case PAUSED:
+    doPaused()
+  case CLOSED:
+    doClosed()
+}
+
+// Compliant - a default clause explicitly handles anything not listed
+switch (status) {
+  case ACTIVE:
+    doActive()
+  default:
+    doOther()
 }
 ```
 
@@ -1332,28 +1769,34 @@ while (!queue.empty()) { // OK: computed condition
 | `concurrenthashmap-contains` | Flags unsafe use of '.contains()' instead of '.containsKey()' on ConcurrentHashMaps. |
 | `consecutive-log-calls` | Flags runs of 2+ consecutive same-level log calls on the same logger that should be merged into one. |
 | `date-time-format` | Flags incorrect date/time format patterns (e.g., 'mm' instead of 'MM' for months). |
+| `default-charset-reliance` | Flags String.getBytes(), new String(byte[]), readers/writers and other JDK APIs that silently use the platform default charset. |
 | `deprecated-override` | Flags Gosu overrides of @Deprecated methods (Java, or Gosu with checkGosuDeprecated). |
 | `deprecated-usage` | Flags calls to or reads of @Deprecated methods or fields, or construction of @Deprecated classes. |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
 | `dynamic-receiver` | Flags method calls, property accesses, and declarations whose type is dynamic.Dynamic - they bypass type-based lint and taint analysis. *(disabled by default - activate with `--rules dynamic-receiver`)* |
+| `equals-hashcode-contract` | Flags classes that override equals() without hashCode() (or vice versa), or overload equals with a non-Object parameter. |
 | `exception-as-string` | Flags explicit 'e as String' casts on Throwable subtypes - use getMessage() or pass the exception to the logger directly. |
+| `expensive-construction-in-loop` | Flags SimpleDateFormat, MessageDigest, DocumentBuilderFactory and ObjectMapper instances created inside a loop. |
 | `explicit-gc` | Flags System.gc() and Runtime.getRuntime().gc() calls (the JVM should manage GC; explicit calls cause unpredictable pauses). |
 | `file-write` | Flags filesystem write operations that may fail on environments with restricted file-write access. |
 | `float-equality` | Flags == and != comparisons on float/double values; use an epsilon tolerance or BigDecimal instead. |
+| `floating-future` | Flags a Future-returning call whose result is discarded as a bare statement. |
 | `foreach-modify` | Flags collection mutations on the same collection being iterated in a foreach loop. |
 | `format-arg-count` | Flags String.format() calls where placeholder count does not match argument count. |
 | `future-get` | Flags Future.get() calls with no timeout argument (blocks the thread indefinitely). |
 | `gson-unsafe-type-dispatch` | Flags custom Gson deserializers that read a JSON type label and resolve classes dynamically from it. |
 | `hardcoded-hex-token` | Flags string literals containing long, high-entropy runs that may be hardcoded secrets or tokens. |
 | `hardcoded-ip-address` | Flags string literals containing a hardcoded IPv4 or IPv6 address; use configuration instead. |
-| `hardcoded-line-separator` | Flags hardcoded \"\\n\", \"\\r\", or \"\\r\\n\" string literals; use System.lineSeparator() for portability. |
+| `hardcoded-line-separator` | Flags hardcoded "\n", "\r", or "\r\n" string literals; use System.lineSeparator() for portability. |
 | `hardcoded-uuid` | Flags string literals matching UUID shapes (canonical 8-4-4-4-12 dashed form or 32-char compact hex). |
+| `identity-compare-on-value` | Flags === and !== on String, boxed numerics, BigDecimal, or BigInteger; these compare by reference, not value. |
 | `immutable-collection-null` | Flags null arguments passed to immutable collection factories ('List.of', 'Set.of', 'Map.of'). |
 | `indexed-removal` | Flags 'list.remove(i)' by index during for-each iteration (causes element skipping). |
 | `inline-collection-call` | Flags method calls made directly on an inline collection or map literal  |
 | `insecure-random` | Flags 'new java.util.Random()' - use SecureRandom for security-sensitive randomness. |
 | `insecure-tls` | Flags SSLContext.getInstance() requests for deprecated protocol versions (SSLv2, SSLv3, TLSv1, TLSv1.1). |
 | `insecure-tls-trust` | Flags classes implementing HostnameVerifier or X509TrustManager, which are commonly used to disable TLS validation. |
+| `integer-division-to-floating` | Flags var declarations of type double/float whose initializer divides two integral operands, silently truncating the result before it is widened. |
 | `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..\|). |
 | `jackson-default-typing` | Flags ObjectMapper.enableDefaultTyping() and activateDefaultTyping() calls that allow gadget-chain deserialization attacks. |
 | `java-final-override` | Flags Gosu overrides of final Java methods. |
@@ -1362,8 +1805,11 @@ while (!queue.empty()) { // OK: computed condition
 | `malformed-string-interpolation` | Flags string interpolation with mismatched or incorrect syntax. |
 | `manual-stream-copy` | Flags loops containing both read() and write() calls; use a stream copy utility instead. |
 | `map-returns-collection` | Flags 'map()' operations that return nested collections that could be flattened with 'flatMap()'. |
-| `null-to-empty-string` | Flags 'str != null ? str : \"\"' patterns; use 'str ?: \"\"' instead. |
+| `no-base-to-string` | Flags explicit .toString() calls, string interpolation, and string concatenation  |
+| `null-to-empty-string` | Flags 'str != null ? str : ""' patterns; use 'str ?: ""' instead. |
 | `precision-loss-narrowing-cast` | Flags narrowing casts and implicit coercions to int/Integer from wider types (long, float, double, BigInteger, BigDecimal) that silently lose precision. |
+| `prefer-object-utils` | Flags null-check chains and null defaults that a single ObjectUtils call can replace. |
+| `prefer-string-utils` | Flags hand-written empty, blank, default, trim and equalsIgnoreCase checks that a single StringUtils call can replace. |
 | `process-spawn` | Flags Runtime.exec() and new ProcessBuilder(...) calls (OS process spawning is fragile and a source of command-injection vulnerabilities). |
 | `redundant-size-check` | Flags redundant size comparisons that are always true or always false. |
 | `reflection-use` | Flags Java java.lang.reflect.* calls and Gosu TypeSystem.* calls that bypass compile-time type safety. |
@@ -1504,6 +1950,47 @@ new SimpleDateFormat("hh:mm:ss a")        // correct 12-hour with AM/PM
 
 </details>
 <details>
+<summary>default-charset-reliance examples</summary>
+
+Flags JDK calls and constructors that silently use the platform's default charset to
+convert between bytes and characters.
+
+On Java 11 and 17 the default charset depends on the operating system and locale - it is
+usually `windows-1252` on a Windows laptop and `UTF-8` on a Linux server. The
+same `"café".getBytes()` therefore produces different bytes on a developer's machine
+and in production, and text with accents or non-Latin characters gets corrupted in files,
+hashes, and network payloads. (UTF-8 only became the default everywhere in JDK 18.)
+Passing an explicit `Charset` makes the behavior the same on every machine.
+
+Flagged APIs (only the overloads that take no charset):
+
+  - `String.getBytes()`, `new String(byte[])`, `new String(byte[], int, int)`
+  - `ByteArrayOutputStream.toString()`
+  - `new InputStreamReader(InputStream)`, `new OutputStreamWriter(OutputStream)`
+  - `new FileReader(...)`, `new FileWriter(...)`
+  - `new PrintWriter(String|File|OutputStream)`, `new PrintStream(String|File|OutputStream)`
+  - `new Scanner(InputStream|File|Path)`
+
+Not flagged: `new String(char[])` (no bytes are decoded), Gosu's
+`File.read()` / `File.write()` enhancements and `java.nio.file.Files`
+helpers (both always use UTF-8), constructors of subclasses of the listed types, and a
+`toString()` that a `ByteArrayOutputStream` subclass overrides. A subclass that
+only inherits `toString()` is still flagged, since the default-charset code is what runs.
+
+```gosu
+// Noncompliant
+var bytes = text.getBytes()
+var text2 = new String(bytes)
+var reader = new InputStreamReader(stream)
+
+// Compliant
+var bytes = text.getBytes(StandardCharsets.UTF_8)
+var text2 = new String(bytes, StandardCharsets.UTF_8)
+var reader = new InputStreamReader(stream, StandardCharsets.UTF_8)
+```
+
+</details>
+<details>
 <summary>deprecated-override examples</summary>
 
 Flags Gosu methods that override a `@Deprecated` Java method.
@@ -1612,24 +2099,87 @@ to `dynamic.Dynamic`. In security-sensitive codebases, dynamic receivers can
 silently bypass type-based lint rules (taint analysis, forbidden-class checks) because
 the receiver's real class is erased to Gosu's dynamic-type singleton.
 
-Four locations are flagged independently:
+Five locations are flagged independently:
 
   - Class-level fields declared as `dynamic.Dynamic`
   - Local variables (including those inside constructor bodies) declared as `dynamic.Dynamic`
   - Method calls whose receiver resolves to `dynamic.Dynamic`
   - Property/field accesses whose receiver resolves to `dynamic.Dynamic`
+  - A `dynamic.Dynamic`-typed value assigned into a variable, local, or field declared
+      with a concrete (non-dynamic, non-`Object`) type - a var initializer, a plain
+      reassignment, or a member/field assignment
 
 ```gosu
 // Noncompliant
 var obj : dynamic.Dynamic = new Dynamic()
 obj.exec(cmd)
 
+// Noncompliant - unsafe assignment: dynamic value flows into a concretely-typed local
+var result : String = obj.exec(cmd)
+
 // Compliant
 var proc : Runtime = Runtime.getRuntime()
 proc.exec(cmd)
+
+// Compliant - Object is an intentional widening, not a lost type guarantee
+var anyResult : Object = obj.exec(cmd)
 ```
 
 Token: `dynamic-receiver` (off by default; opt-in via `--rules dynamic-receiver`).
+
+</details>
+<details>
+<summary>equals-hashcode-contract examples</summary>
+
+Flags a class that overrides one half of the `equals()`/`hashCode()` contract but not
+the other, or that overloads `equals()` with a non-`Object` parameter instead of
+overriding it.
+
+In Gosu, `==` on a reference type calls `.equals()` under the hood (see
+`identity-compare-on-value` for the related `===` pitfall), so a custom
+`equals()` gets exercised far more often than in Java, where `==` is always identity.
+If a class overrides `equals()` but not `hashCode()`, two instances can compare equal
+with `==` while a `HashMap`, `HashSet`, `distinct()`, or `toMap()`
+key lookup silently treats them as different - the classic broken hash contract, and one that
+fails quietly rather than with an error.
+
+Configuration:
+
+  - `checkHashCodeWithoutEquals` (boolean, default `true`) - when `false`,
+      a class that overrides only `hashCode()` is not flagged.
+  - `checkCovariantEquals` (boolean, default `true`) - when `false`, a class
+      whose only `equals` declaration takes a non-`Object` parameter is not flagged.
+
+```gosu
+// Noncompliant - overrides equals() but inherits the default hashCode(); two "equal" Widgets
+// hash to different buckets, so a HashSet<Widget> can hold both as if they were distinct
+class Widget {
+  var _id : int
+  override function equals(o : Object) : boolean {
+    return o typeis Widget && o._id == _id
+  }
+}
+
+// Noncompliant - overloads equals() instead of overriding it; == and HashMap/HashSet never
+// call this method, since both always bind to equals(Object)
+class Money {
+  var _cents : int
+  function equals(o : Money) : boolean {
+    return o._cents == _cents
+  }
+}
+
+// Compliant - both methods overridden together, using the same field
+class Widget {
+  var _id : int
+  override function equals(o : Object) : boolean {
+    return o typeis Widget && o._id == _id
+  }
+  override function hashCode() : int {
+    return _id
+  }
+}
+```
 
 </details>
 <details>
@@ -1652,6 +2202,55 @@ catch (e : Exception) {
 // Compliant
 catch (e : Exception) {
   logger.error("operation failed", e)
+}
+```
+
+</details>
+<details>
+<summary>expensive-construction-in-loop examples</summary>
+
+Flags construction of well-known expensive objects inside a loop, where a new instance is
+built on every iteration even though one instance created before the loop would do.
+
+This is performance advice, not a correctness bug, so it reports at low severity. Disable
+it with `--skip-rules expensive-construction-in-loop`.
+
+Built-in types (kept deliberately short so the rule stays quiet on ordinary code):
+
+  - `new java.text.SimpleDateFormat(...)` - parses its pattern on every construction.
+      Not thread-safe: hoist it out of the loop as a local, or switch to
+      `java.time.format.DateTimeFormatter`, which is immutable.
+  - `java.security.MessageDigest.getInstance(...)` - a security-provider lookup on every
+      call. Not thread-safe: hoist it out of the loop as a local and call `reset()`
+      (or just `digest()`, which resets it) between uses.
+  - `javax.xml.parsers.DocumentBuilderFactory.newInstance()` - scans the classpath for
+      an XML implementation on every call. Not thread-safe: hoist it as a local.
+  - `new com.fasterxml.jackson.databind.ObjectMapper()` - builds large internal caches.
+      Thread-safe once configured: hoist it out of the loop or into a static field.
+
+`Pattern.compile()` is not reported here - `regex-compile-in-loop` already
+covers it, and `java.util.regex.Pattern` is ignored even if listed in `extraTypes`.
+A construction inside a nested loop is reported once. Loops are for-each, while and do-while.
+Code inside a closure written in a loop is not reported, because the closure may run after
+the loop rather than once per iteration; a loop written inside a closure is checked normally.
+
+Configuration:
+
+  - `extraTypes` - additional types to flag (comma-separated FQNs or simple names).
+      Matches `new T(...)` and static factories on `T` that return a `T`.
+  - `disableDefaults=true` - replace the built-in list with only `extraTypes`
+
+```gosu
+// Noncompliant
+for (order in orders) {
+  var fmt = new SimpleDateFormat("yyyy-MM-dd")
+  print(fmt.format(order.Date))
+}
+
+// Compliant
+var fmt = new SimpleDateFormat("yyyy-MM-dd")
+for (order in orders) {
+  print(fmt.format(order.Date))
 }
 ```
 
@@ -1742,6 +2341,44 @@ if (Math.abs(result - 0.3) < 1e-9) { ... }
 var a = new BigDecimal("0.1")
 var b = new BigDecimal("0.2")
 if (a.add(b).compareTo(new BigDecimal("0.3")) == 0) { ... }
+```
+
+</details>
+<details>
+<summary>floating-future examples</summary>
+
+Flags a call whose resolved return type is `Future` (or a subtype) when its result is
+discarded - used as a bare statement instead of being assigned, chained, or returned.
+
+A "floating" future like this is a silent trap: the work it represents may still be running
+in the background, but nothing ever checks whether it succeeded, and any exception it throws
+simply vanishes instead of surfacing anywhere. This is the type-aware distinction from a
+name-based check - it resolves the call's actual return type instead of guessing from method
+names like `submit`/`schedule`, which would misfire on unrelated domain methods
+that happen to share a name but return something else entirely.
+
+Covers all `java.util.concurrent.Future` subtypes by resolved type identity:
+`Future` itself, `CompletableFuture`, and Guava `ListenableFuture`.
+
+```gosu
+// Noncompliant - the future's completion/exception is never observed
+executor.submit(task)
+
+// Compliant - result is assigned so it can be inspected later
+var future = executor.submit(task)
+
+// Compliant - chained to .get(), whose own return type is the task's result, not a
+// Future - so the completion is actually observed here, and nothing is discarded
+executor.submit(task).get()
+
+// Compliant - returned to the caller, who is responsible for it
+return executor.submit(task)
+
+// Noncompliant - thenAccept only runs on success; a failure is silently dropped
+CompletableFuture.supplyAsync(work).thenAccept(\ r -> print(r))
+
+// Compliant - whenComplete sees both the result and the exception
+CompletableFuture.supplyAsync(work).whenComplete(\ r, ex -> report(r, ex))
 ```
 
 </details>
@@ -1837,6 +2474,96 @@ var result = future.get(5, TimeUnit.SECONDS)
 
 </details>
 <details>
+<summary>gson-unsafe-type-dispatch examples</summary>
+
+Flags custom Gson deserializers that read a type label from JSON and resolve classes dynamically.
+
+Gson is safe by default - it does not provide a built-in feature equivalent to Jackson
+default typing. The risk appears only when application code recreates polymorphic type
+dispatch manually, typically by reading a JSON field such as `"type"` and feeding it
+into `Class.forName(...)` or another dynamic type lookup API before delegating back to
+Gson for object construction.
+
+```gosu
+// Noncompliant - untrusted JSON controls which class is instantiated
+class UnsafeDeserializer implements JsonDeserializer {
+  function deserialize(json : JsonElement, typeOfT : Object, context : JsonDeserializationContext) : Object {
+    var obj = json.getAsJsonObject()
+    var className = obj.get("type").getAsString()
+    var clazz = Class.forName(className)
+    return context.deserialize(obj.get("data"), clazz)
+  }
+}
+
+// Compliant - external labels map to an explicit allowlist
+class SafeDeserializer implements JsonDeserializer {
+  function deserialize(json : JsonElement, typeOfT : Object, context : JsonDeserializationContext) : Object {
+    var obj = json.getAsJsonObject()
+    var kind = obj.get("type").getAsString()
+    var allowed = {"user" -> String, "order" -> Integer}
+    var clazz = allowed.get(kind)
+    return context.deserialize(obj.get("data"), clazz)
+  }
+}
+```
+
+</details>
+<details>
+<summary>hardcoded-hex-token examples</summary>
+
+Flags string literals that contain a long, high-entropy alphanumeric run consistent
+with a hardcoded API token, key, or secret. The detector scans inside each
+literal for embedded runs, so tokens with conventional provider prefixes
+(`sk_live_...`, `ghp_...`, `xoxb-...`) are caught alongside bare
+random strings.
+
+A run must contain at least one letter and a digit-to-length ratio at or above
+`minDigitRatio` (default `0.10`). This excludes long descriptive
+identifiers like `"getUserAccountByEmailAddress"` (no digits) as well as
+identifier strings with a small digit suffix/infix bolted onto an otherwise
+alphabetic stem (digits well under 10% of the run). Known low-entropy magic
+constants like `DEADBEEF` are excluded by the entropy threshold.
+Literals containing `"://"` are treated as URLs and skipped wholesale -
+URL paths often hit the alphabet's slash and produce a single very long run
+that is not a credential.
+
+Output redacts the literal to a short prefix followed by an ellipsis so the
+violation message itself does not leak the secret to logs or trackers.
+
+Configurable via `--rule-config`:
+
+  - `minLength` - minimum run length to check (default: `20`)
+  - `entropyThreshold` - minimum Shannon entropy in bits/char to flag
+      (default: `4.0`; lower to ~3.5 to also catch hex tokens, MD5s, UUIDs)
+  - `minDigitRatio` - minimum digits/length ratio required to flag a run
+      (default: `0.10`). Filters identifier-style strings with a small
+      digit cluster bolted onto a long alphabetic stem.
+  - `ignorePureHex` - when `true`, skip any run composed entirely of
+      hex digits (`0-9a-fA-F`). Useful in combination with a lowered
+      `entropyThreshold` to keep catching mixed-alphabet tokens while
+      filtering UUIDs without dashes, MD5/SHA digests, and git SHAs
+      (default: `false`)
+
+Examples below use synthetic prefixes (`fake_key_`, `fakepat_`) in
+place of real provider prefixes (`sk_live_`, `ghp_`) so this file
+does not trip secret scanners. The rule keys off run length, entropy, and
+digit+letter mix - not the prefix itself.
+
+```gosu
+// Noncompliant
+var stripe = "fake_key_4eC39HqLyjWDarjtT1zdp7dc"
+var github = "fakepat_16C7e42F292c6912E7710c838347Ae178B4a"
+var bare   = "AbCdEf1234GhIjKl5678MnOpQrSt"
+
+// Compliant
+var magic    = "DEADBEEFCAFEBABEDEADBEEF"   // low entropy
+var name     = "getUserAccountByEmailAddress" // no digits
+var shortVal = "a3f9b2c1"                     // below min-length 20
+var sentence = "the quick brown fox jumps"   // separators break runs; words have no digits
+```
+
+</details>
+<details>
 <summary>hardcoded-ip-address examples</summary>
 
 Flags string literals that contain a hardcoded IPv4 or IPv6 address.
@@ -1904,6 +2631,34 @@ var compact   = "550e8400e29b41d4a716446655440000"
 // Compliant
 var truncated = "550e8400-e29b-41d4"   // partial UUID, no full match
 var notHex    = "550e8400-XXXX-41d4-a716-446655440000"
+```
+
+</details>
+<details>
+<summary>identity-compare-on-value examples</summary>
+
+Flags `===` and `!==` comparisons where either operand is a `String`, a
+boxed numeric wrapper, `BigDecimal`, or `BigInteger`.
+
+Gosu inverts Java's equality operators: `==` already means value equality (it calls
+`.equals()` under the hood), and `===` means reference identity. A developer
+reaching for `===` out of Java habit - expecting it to be the "strict" or "more correct"
+comparison - silently gets identity comparison instead. For types like `BigDecimal`,
+two values that are mathematically equal are almost never the same object instance, so the
+comparison is nearly always `false` when the developer meant it to be `true`.
+
+```gosu
+// Noncompliant - two equal BigDecimal values are rarely the same instance;
+// this is almost always false, even when a and b represent the same amount
+var a = new BigDecimal("10.00")
+var b = new BigDecimal("10.00")
+if (a === b) { ... }
+
+// Compliant - == calls .equals(), comparing by value
+if (a == b) { ... }
+
+// Compliant - compareTo() ignores scale differences that .equals() would catch
+if (a.compareTo(b) == 0) { ... }
 ```
 
 </details>
@@ -2013,6 +2768,34 @@ if (GREETINGS.contains(greeting)) { ... }
 
 </details>
 <details>
+<summary>insecure-random examples</summary>
+
+Flags instantiation of `java.util.Random`.
+
+`java.util.Random` uses a linear congruential generator whose output is
+predictable given a few observed values. It must not be used for:
+
+  - Security tokens, session IDs, CSRF tokens, or any secret material
+  - Password generation or cryptographic key derivation
+  - Lottery / gambling / fair-draw scenarios
+
+Use `java.security.SecureRandom` instead. For high-throughput non-security
+randomness (e.g. load-balancing jitter), `java.util.concurrent.ThreadLocalRandom`
+is a faster alternative that at least avoids the shared-state contention of
+`java.util.Random`.
+
+```gosu
+// Noncompliant
+var rng = new Random()
+var token = rng.nextLong().toString(16)
+
+// Compliant
+var rng = new SecureRandom()
+var token = rng.nextLong().toString(16)
+```
+
+</details>
+<details>
 <summary>insecure-tls examples</summary>
 
 Flags `SSLContext.getInstance()` called with a deprecated protocol version.
@@ -2035,6 +2818,70 @@ SSLContext.getInstance("TLSv1.3")
 
 </details>
 <details>
+<summary>insecure-tls-trust examples</summary>
+
+Flags classes that implement `HostnameVerifier` or `X509TrustManager`,
+both of which are commonly overridden to disable TLS certificate and hostname
+validation - a critical security vulnerability.
+
+A custom `HostnameVerifier` that returns `true` unconditionally or
+a `X509TrustManager` with empty `checkServerTrusted` / `checkClientTrusted`
+methods will silently accept any certificate or hostname, making the TLS connection
+trivially vulnerable to man-in-the-middle attacks.
+
+### Transitive interface detection (opt-in)
+
+By default, only a class's own direct interfaces are checked - a class that inherits
+`HostnameVerifier`/`X509TrustManager` through a superclass rather than
+implementing it directly is not flagged. Set `checkTransitiveInterfaces=true` to also
+check the class's supertype:
+`--rule-config insecure-tls-trust:checkTransitiveInterfaces=true`
+
+```gosu
+// Noncompliant - accepts any hostname
+class TrustAllVerifier implements HostnameVerifier {
+  function verify(host : String, session : SSLSession) : boolean { return true }
+}
+
+// Noncompliant - accepts any certificate
+class TrustAllManager implements X509TrustManager {
+  function checkClientTrusted(chain : X509Certificate[], authType : String) {}
+  function checkServerTrusted(chain : X509Certificate[], authType : String) {}
+  function getAcceptedIssuers() : X509Certificate[] { return null }
+}
+
+// Compliant - use the system default trust manager
+var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+tmf.init(null)
+```
+
+</details>
+<details>
+<summary>integer-division-to-floating examples</summary>
+
+Flags `var` declarations with a floating-point type (`double`/`float`)
+whose initializer is an integer division - the quotient is truncated to an integer
+before it gets widened to the declared type, silently discarding the fractional part.
+
+Gosu (like Java) computes `a / b` using integer division whenever both operands are
+integral. Only the already-truncated result gets converted to `double`/`float`
+afterward - by then the fractional part is gone for good. Widening at least one operand
+before the division runs (so the division itself happens in floating-point) fixes it.
+
+```gosu
+// Noncompliant - both operands are int; division truncates before widening to double
+var average : double = totalScore / count
+
+// Noncompliant - casting the whole quotient doesn't help; the truncation already happened
+var average : double = (double) (totalScore / count)
+
+// Compliant - widen an operand first so the division itself is floating-point
+var average : double = (double) totalScore / count
+var average : double = totalScore / (double) count
+```
+
+</details>
+<details>
 <summary>interval-boundary-confusion examples</summary>
 
 Flags inclusive `..` range literals whose right-hand side is a
@@ -2052,6 +2899,29 @@ for (i in 0..items.size()) { ... }
 
 // GOOD - exclusive upper bound
 for (i in 0..|items.size()) { ... }
+```
+
+</details>
+<details>
+<summary>jackson-default-typing examples</summary>
+
+Flags `ObjectMapper.enableDefaultTyping()` and `activateDefaultTyping()` calls
+that enable polymorphic deserialization and open gadget-chain attack vectors.
+
+Default typing instructs Jackson to embed Java class names in serialized JSON and
+reconstruct arbitrary class instances during deserialization. An attacker who controls
+the input JSON can trigger instantiation of any class on the classpath, enabling
+remote code execution via gadget chains (CVE-2017-7525 and related CVEs).
+
+```gosu
+// Noncompliant - any class on the classpath can be instantiated
+var mapper = new ObjectMapper()
+mapper.enableDefaultTyping()
+mapper.activateDefaultTyping(validator)
+
+// Compliant - no default typing; use explicit @JsonTypeInfo annotations instead
+var mapper = new ObjectMapper()
+var result = mapper.writeValueAsString(obj)
 ```
 
 </details>
@@ -2158,16 +3028,16 @@ Three patterns are detected:
       identifier name; the correct form wraps it in ${...}.
 
 ```gosu
-// Noncompliant - bare $identifier; use $&#123;name} instead
+// Noncompliant - bare $identifier; use ${name} instead
 var msg = "Hello $name, welcome!"
 
 // Noncompliant - unclosed interpolation; missing closing brace
-var msg = "Value is $&#123;value"
+var msg = "Value is ${value"
 
 // Noncompliant - wrong closing delimiter; ) instead of closing brace
-var msg = "Result: $&#123;compute())"
+var msg = "Result: ${compute())"
 
-// Compliant - use string concatenation or correct $&#123;...} syntax
+// Compliant - use string concatenation or correct ${...} syntax
 var msg = "Hello " + name + ", welcome!"
 var msg = "Value is " + value
 ```
@@ -2225,6 +3095,51 @@ var names = widgets.map(\w -> w.getName())                // lambda returns a sc
 
 </details>
 <details>
+<summary>no-base-to-string examples</summary>
+
+Flags a `.toString()` call whose receiver's resolved static type never declares its own
+`toString()` anywhere between it and `java.lang.Object`. The same check applies to
+the implicit conversions Gosu performs for string interpolation (`"${obj}"`) and string
+concatenation (`"x" + obj`), which are far more common than an explicit call.
+
+Unless a class overrides `toString()`, calling it produces the default
+`ClassName@hexhash` format inherited from `Object` - a memory-address-derived
+string that is almost never what the caller actually wanted to print, log, or compare.
+
+Array, `Stream`, and `Optional` receivers are deliberately out of scope here -
+those are already covered by `ToStringMisuseRule` (`tostring-misuse`), which gives
+them more specific advice than "override toString()" would. Enum receivers are also excluded:
+`Enum.toString()` is itself a real override (it returns the constant's name), so an enum
+constant is never missing a meaningful `toString()`. Abstract-class and interface
+receivers are skipped too - the runtime object is always a concrete subtype that may supply
+its own `toString()`.
+
+```gosu
+class Widget {
+  var _id : int
+}
+
+// Noncompliant - Widget never overrides toString(), so this prints "Widget@1a2b3c4d"
+print(new Widget().toString())
+
+// Noncompliant - the same default toString() runs implicitly here
+var w = new Widget()
+print("widget: ${w}")
+print("widget: " + w)
+
+class LabeledWidget {
+  var _label : String
+  override function toString() : String {
+    return _label
+  }
+}
+
+// Compliant - LabeledWidget overrides toString() with something meaningful
+print(new LabeledWidget().toString())
+```
+
+</details>
+<details>
 <summary>null-to-empty-string examples</summary>
 
 Flags `str != null ? str : ""` ternary patterns that can be replaced with the
@@ -2270,6 +3185,87 @@ var count : int = Math.toIntExact(totalRows)   // throws on overflow
 var rounded : int = Math.round(1.9f)            // explicit rounding
 var fromBd : int = bigDecVal.intValueExact()    // throws on fraction
 ```
+
+</details>
+<details>
+<summary>prefer-object-utils examples</summary>
+
+Suggests `ObjectUtils` helpers for hand-written null checks.
+The rule only reports when `org.apache.commons.lang3.ObjectUtils` resolves in the
+analyzed project, and only suggests methods that exist in the version it finds.
+
+Null-check chains of at least 3 operands (configurable with key
+`"minOperands"`) map to `allNotNull`, `anyNull`, `allNull` or
+`anyNotNull`. Null defaults map to `getIfNull` or `firstNonNull`.
+
+```gosu
+// Noncompliant
+if (a != null and b != null and c != null) { ... }
+var name = nickname != null ? nickname : "unknown"
+if (title == null) { title = "untitled" }
+
+// Compliant
+if (ObjectUtils.allNotNull(a, b, c)) { ... }
+var name = ObjectUtils.getIfNull(nickname, "unknown")
+title = ObjectUtils.getIfNull(title, "untitled")
+```
+
+By default only local variables and parameters are rewritten. Anything else could behave
+differently once its read is moved, merged or skipped, so it is left alone:
+
+  - a field (a `volatile` field changes memory ordering when read early, and another
+      thread can change a field between a ternary's two reads)
+  - a property or member access such as `a.b` (a getter, even a compiler-generated
+      one, can be overridden by a subclass to do anything)
+  - a method call
+
+Set `allowFieldReads=true` to also rewrite plain fields, either named directly
+(`_count`) or reached through a receiver (`order.Total`), where the project accepts
+the extra or fewer field reads. It covers reads only: `if (_f == null) { _f = y }` is
+still left alone because the rewrite would also write the field back. Properties and method
+calls are never rewritten, with or without the setting.
+
+```gosu
+--rule-config prefer-object-utils:allowFieldReads=true
+```
+
+Also not flagged: a variable tested twice in one chain, a later check that depends on an
+earlier one (`a != null and a.b != null`), and code that already uses Gosu's
+`?:` operator. A default value that is not a literal or a local gets the lazy
+`getIfNull(x, \ -> y)` form, so it is still evaluated only when needed.
+
+</details>
+<details>
+<summary>prefer-string-utils examples</summary>
+
+Suggests `StringUtils` helpers for hand-written string checks.
+The rule only reports when `org.apache.commons.lang3.StringUtils` resolves in the
+analyzed project, and only suggests methods that exist there and are not deprecated.
+
+```gosu
+// Noncompliant
+if (name == null or name.isEmpty()) { ... }
+var label = name == null or name.isBlank() ? "n/a" : name
+if (code != null and code.equalsIgnoreCase("ok")) { ... }
+var clean = text == null ? "" : text.trim()
+
+// Compliant
+if (StringUtils.isEmpty(name)) { ... }
+var label = StringUtils.defaultIfBlank(name, "n/a")
+if (StringUtils.equalsIgnoreCase(code, "ok")) { ... }
+var clean = StringUtils.trimToEmpty(text)
+```
+
+Gosu's own `s.HasContent` and `s.NotBlank` are not offered as alternatives:
+they throw a NullPointerException when `s` is null, so they are not a drop-in for a
+null-safe check. `s?.trim()` is equivalent to `StringUtils.trim(s)`, and the message
+says so.
+
+Only local variables and parameters of type `String` are rewritten. Anything else
+could behave differently once it is read fewer times, so it is left alone. Also not flagged:
+`trim()`-based blank checks (they treat Unicode whitespace differently from
+`isBlank`), truncation and case-folding comparisons (they throw on null where the
+library does not), and an `equalsIgnoreCase` call whose argument is not a literal.
 
 </details>
 <details>
@@ -2378,6 +3374,50 @@ class/method names change, and carry a measurable runtime overhead.
       `ReflectUtil.*` invocation calls
   - `allowedMethods` (comma-separated, default `""`) - method
       names to skip regardless of declaring type, e.g. `"getClass,getMethod"`
+
+</details>
+<details>
+<summary>regex-bad-pattern examples</summary>
+
+Flags regex patterns with structural problems that will cause runtime exceptions or
+catastrophic backtracking (ReDoS).
+
+Six checks are applied to string-literal arguments of `Pattern.compile()`,
+`str.matches()`, `str.replaceAll()`, and `str.replaceFirst()`:
+
+  - **Invalid character range** - e.g. `[a-Z]` (code point 97 > 90) throws
+      `PatternSyntaxException` at runtime.
+  - **Nested quantifiers** - a quantified group whose content also contains a
+      quantifier, e.g. `(a+)+`, causes catastrophic backtracking (ReDoS).
+  - **Overly broad pattern** - a pattern that is entirely `.*` or `.+`
+      (with optional `^`/`$` anchors) matches everything and is almost certainly
+      a placeholder or copy-paste mistake.
+  - **Case flag conflict** - `CASE_INSENSITIVE` combined with a single-case
+      range like `[A-Z]` makes the explicit range redundant.
+  - **Ambiguous alternation** - alternatives in a quantified group where one is a
+      prefix of another, e.g. `(cat|catch)+`, cause catastrophic backtracking.
+  - **Chained wildcards** - three or more `.*` or `.+` in one pattern
+      force O(n^k) backtracking for near-miss inputs.
+
+```gosu
+// Noncompliant - invalid character range; throws PatternSyntaxException at runtime
+Pattern.compile("[a-Z]")
+
+// Noncompliant - nested quantifiers; catastrophic backtracking on certain inputs
+Pattern.compile("(a+)+")
+Pattern.compile("(\\w+\\s*)+")
+
+// Noncompliant - overly broad; matches every possible string
+Pattern.compile(".*")
+
+// Noncompliant - ambiguous alternation; (cat|catch)+ backtracks exponentially
+Pattern.compile("(cat|catch)+")
+
+// Compliant
+Pattern.compile("[a-zA-Z]")
+Pattern.compile("a+")
+Pattern.compile("[a-z]+(?:\\s+[a-z]+)*")
+```
 
 </details>
 <details>
@@ -2751,15 +3791,261 @@ static var _fmt : DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 ```
 
 </details>
+<details>
+<summary>xxe-unsafe-factory examples</summary>
+
+Flags `DocumentBuilderFactory.newInstance()` calls that are not protected by
+`setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)`.
+
+By default, `DocumentBuilderFactory` allows XML external entity (XXE) processing.
+An attacker who controls XML input can use XXE to:
+
+  - Read arbitrary files on the server (e.g. `/etc/passwd`)
+  - Perform server-side request forgery (SSRF)
+  - Cause denial of service via "billion laughs" entity expansion
+
+The fix is to enable secure processing on the factory before creating the builder:
+
+```gosu
+// Noncompliant - XXE enabled by default
+var factory = DocumentBuilderFactory.newInstance()
+var builder = factory.newDocumentBuilder()
+var doc = builder.parse(inputStream)
+
+// Compliant - secure processing disables external entities
+var factory = DocumentBuilderFactory.newInstance()
+factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+var builder = factory.newDocumentBuilder()
+var doc = builder.parse(inputStream)
+```
+
+</details>
+<details>
+<summary>zip-slip examples</summary>
+
+Flags use of `ZipEntry.getName()` as a file path component without canonicalization,
+which allows directory traversal (zip-slip) attacks via crafted archive paths.
+
+When a ZIP archive is extracted naively, an attacker can embed an entry with a name
+such as `../../etc/passwd`. If that name is passed directly to `new File(outputDir, name)`
+or `Paths.get(outputDir, name)`, the resulting path escapes the intended extraction
+directory. The fix is to canonicalize the destination and verify it still starts with
+the output directory.
+
+```gosu
+// Noncompliant - path traversal if name contains "../"
+function extractFail(outputDir : File, entry : ZipEntry) : File {
+  var name = entry.getName()
+  return new File(outputDir, name)
+}
+
+// Compliant - canonical path verified before use
+function extractPass(outputDir : File, entry : ZipEntry) : File {
+  var name = entry.getName()
+  var dest = new File(outputDir, name)
+  if (!dest.getCanonicalPath().startsWith(outputDir.getCanonicalPath())) {
+    throw new IOException("Zip slip attack detected")
+  }
+  return dest
+}
+```
+
+</details>
 
 ### security
 
 | Token | Detects |
 |-------|---------|
-| `command-injection` | Detects function parameters that flow to Runtime.exec() or new ProcessBuilder() without sanitization. |
-| `log-injection` | Detects unsanitized HTTP request values flowing to log calls - enables log injection attacks via newline characters. |
-| `path-traversal` | Detects function parameters flowing to file-system operations without proper validation. |
-| `sql-injection` | Detects function parameters flowing to SQL execution without proper parameterization. |
+| `command-injection` | Detects function parameters that flow to Runtime.exec() or new ProcessBuilder() without sanitization. Best-effort heuristic, not a sound/complete taint-tracking engine. |
+| `log-injection` | Detects unsanitized HTTP request values flowing to log calls - enables log injection attacks via newline characters. Best-effort heuristic, not a sound/complete taint-tracking engine. |
+| `path-traversal` | Detects function parameters flowing to file-system operations without proper validation. Best-effort heuristic, not a sound/complete taint-tracking engine. |
+| `sql-injection` | Detects function parameters flowing to SQL execution without proper parameterization. Best-effort heuristic, not a sound/complete taint-tracking engine. |
+
+<details>
+<summary>command-injection examples</summary>
+
+Detects function parameters that flow to `Runtime.exec()` or
+`new ProcessBuilder()` without sanitization.
+
+Uses intra-procedural taint analysis: parameters are treated as untrusted
+sources, and the engine tracks taint through local variables, assignments,
+string concatenation, and mutable object mutation (e.g. StringBuilder.append)
+before flagging the dangerous sink call.
+
+This is a best-effort heuristic that catches direct, obvious flows - it is not a sound
+or complete taint-tracking engine, and a clean result here is not a security guarantee.
+
+```gosu
+// Noncompliant - parameter flows directly to exec
+function run(cmd : String) {
+  Runtime.getRuntime().exec(cmd)
+}
+
+// Noncompliant - parameter flows through a local variable
+function run(name : String) {
+  var cmd = "rm -rf " + name
+  Runtime.getRuntime().exec(cmd)
+}
+
+// Compliant - no parameter, hardcoded command
+function safeRun() {
+  Runtime.getRuntime().exec("ls -la")
+}
+```
+
+</details>
+<details>
+<summary>log-injection examples</summary>
+
+Detects unsanitized HTTP request values that flow to log calls, enabling log injection attacks.
+
+Uses intra-procedural taint analysis: HttpServletRequest.getHeader() and
+HttpServletRequest.getParameter() are taint sources. The engine tracks taint through
+local variables, assignments, string builders, and format operations before flagging
+dangerous logger calls.
+
+Attackers can inject fake log entries or disrupt log parsing by supplying newline
+characters (e.g. `\r\n`) in request parameters that flow directly or indirectly
+to log output.
+
+This is a best-effort heuristic that catches direct, obvious flows - it is not a sound
+or complete taint-tracking engine, and a clean result here is not a security guarantee.
+
+```gosu
+// Noncompliant - request parameter flows directly to log
+function handleRequest(request : HttpServletRequest) {
+  var user = request.getParameter("user")
+  LOG.info(user)
+}
+
+// Noncompliant - request value flows through a string builder
+function handleRequest(request : HttpServletRequest) {
+  var msg = new StringBuilder("User: ")
+  msg.append(request.getParameter("name"))
+  LOG.info(msg.toString())
+}
+
+// Noncompliant - request value flows through String.format
+function handleRequest(request : HttpServletRequest) {
+  var msg = String.format("IP=%s", request.getHeader("X-Forwarded-For"))
+  LOG.warn(msg)
+}
+
+// Compliant - no request value, hardcoded message
+function handleRequest(request : HttpServletRequest) {
+  LOG.info("Request processed")
+}
+```
+
+</details>
+<details>
+<summary>path-traversal examples</summary>
+
+Detects function parameters that flow to file-system operations without proper validation.
+
+Uses intra-procedural taint analysis: parameters are treated as untrusted sources,
+and the engine tracks taint through local variables, assignments, and collection access
+before flagging the dangerous file-operation sink.
+
+Path traversal (directory traversal) occurs when unsanitized path components reach
+file-system operations, allowing attackers to access files outside the intended directory
+(e.g. using ".." sequences).
+
+This is a best-effort heuristic that catches direct, obvious flows - it is not a sound
+or complete taint-tracking engine, and a clean result here is not a security guarantee.
+
+```gosu
+// Noncompliant - parameter flows directly to File constructor
+function download(filename : String) {
+  var f = new File(filename)
+  Files.readAllBytes(f.toPath())
+}
+
+// Noncompliant - parameter flows through array access to Paths.get
+function openFile(parts : String[]) {
+  Paths.get(parts[0])
+}
+
+// Compliant - the path is validated BEFORE any file object is built from it, and the
+// function is declared as a sanitizer so the tool trusts it instead of guessing from
+// its name (see the paragraph below the example).
+@SuppressWarnings("gslint:sanitizes")
+function validatePath(raw : String) : String {
+  if (raw.contains("..")) { throw new IllegalArgumentException("Invalid path") }
+  return raw
+}
+
+function download(filename : String) {
+  var safe = validatePath(filename)
+  Files.readAllBytes(Paths.get(safe))
+}
+```
+
+The annotation declares that `validatePath` clears taint for every taint-backed
+rule; add a `:path-traversal` suffix (`"gslint:sanitizes:path-traversal"`) to
+scope it to this rule alone. See `org.gslint.parser.taint.SanitizerAnnotationChecker`.
+
+A different fix that looks similar but does not work: sanitizing on the way
+out of a file object, e.g. `new File(filename).getCanonicalPath()`. That
+does not help, because the raw, unvalidated `filename` was already used to construct
+the `File` one line earlier - the damage (if any) is already done by the time you
+canonicalize. This rule flags that construction, and reports it even when the surrounding
+call is a recognized sanitizer.
+
+Known limitation: `Paths.get(...)` behind a `dynamic.Dynamic` receiver
+
+When the receiver type is erased to `dynamic.Dynamic`, the conservative
+dynamic-bypass branch in the taint engine fires only for method names this rule lists as
+dynamic-sink candidates. The set is restricted to `java.nio.file.Files` static sinks
+(e.g. `newInputStream`, `readAllBytes`, `write`, `copy`, `move`,
+`delete`). The bare name `get` is intentionally excluded, because
+`Map.get`, `List.get`, and many domain APIs all expose a `get(...)` method;
+including it would produce a high-volume false-positive on every benign dynamic-bag lookup.
+
+Consequence: a tainted argument flowing into `paths.get(userInput)` where
+`paths` is typed `dynamic.Dynamic` will not be flagged by this
+rule, even though it could be a real `Paths.get` sink. To audit such code, declare the
+receiver with its real type (`Paths`) so static dispatch can resolve the call, or run
+the `dynamic-receiver` lint rule separately to surface the dynamic declaration itself.
+
+</details>
+<details>
+<summary>sql-injection examples</summary>
+
+Detects function parameters that flow to JDBC methods without proper parameterization.
+
+Uses intra-procedural taint analysis: parameters are treated as untrusted sources,
+and the engine tracks taint through local variables, assignments, string concatenation,
+and format operations before flagging the dangerous sink call.
+
+SQL injection occurs when unsanitized data becomes part of a SQL command string,
+allowing attackers to alter the query structure or bypass access controls.
+
+This is a best-effort heuristic that catches direct, obvious flows - it is not a sound
+or complete taint-tracking engine, and a clean result here is not a security guarantee.
+
+```gosu
+// Noncompliant - parameter flows into query string via concatenation
+function getUser(id : int) {
+  var query = "SELECT * FROM users WHERE id=" + id
+  stmt.executeQuery(query)
+}
+
+// Noncompliant - parameter flows to prepareStatement template
+function runProcedure(procName : String) {
+  var call = "{call " + procName + "(?)}"
+  conn.prepareCall(call)
+}
+
+// Compliant - bind parameters separate data from structure
+function getUser(id : int) {
+  var pstmt = conn.prepareStatement("SELECT * FROM users WHERE id=?")
+  pstmt.setInt(1, id)
+  pstmt.executeQuery()
+}
+```
+
+</details>
 
 ### style
 
@@ -2772,7 +4058,7 @@ static var _fmt : DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 | `comment-density` | Flags source files whose comment-to-code ratio falls below the configured  *(disabled by default - activate with `--rules comment-density`)* |
 | `constant-naming` | Flags constants not using UPPER_CASE naming convention. |
 | `constructor-order` | Flags constructors that are not ordered from most-specific to least-specific parameters. |
-| `embedded-tab` | Flags string literals containing a literal tab character (use \\t instead). |
+| `embedded-tab` | Flags string literals containing a literal tab character (use \t instead). |
 | `enhancement-modifies-state` | Flags enhancement methods that mutate the enhanced type's fields via this.field = ... *(disabled by default - activate with `--rules enhancement-modifies-state`)* |
 | `excessive-newlines` | Flags excessive consecutive blank lines in code (default threshold: 2). |
 | `field-order` | Flags field declarations that appear after constructors or methods. |
@@ -3150,6 +4436,13 @@ if (fs != null) {
 }
 ```
 
+Wrapping the nested ternary in parentheses does not hide it:
+`a ? b : (c ? d : e)` is flagged the same as `a ? b : c ? d : e`. Neither does
+a type conversion the compiler inserts between the branches.
+
+Gosu's Elvis operator `?:` is not counted. It is null-coalescing, not a branch, so
+`a ?: b ?: "default"` is not a nested ternary.
+
 Only the outer ternary in a chain is flagged; the rule does not double-flag
 a single nesting level. Each additional nesting level produces one extra violation.
 
@@ -3246,6 +4539,10 @@ property set Name(v : String) {
   _name = v.trim()            // has validation/transformation
 }
 ```
+
+Not flagged either: getters that return another property instead of a backing field,
+and `override` getters (they implement an inherited contract, and the shorthand
+cannot be marked `override`).
 
 </details>
 <details>
@@ -3374,7 +4671,7 @@ print("Cleared")
 | `err03g-sensitive-exception-exposure` | Flags catch blocks that expose raw exception data or preserve sensitive causes. |
 | `inj00g-string-query` | Flags SQL queries built with string concatenation or interpolation; use PreparedStatement with ? placeholders. |
 | `res00g-close-not-in-finally` | Flags resource close statements not in a 'finally' block or 'using' statement. |
-| `res00g-not-in-using` | Flags closeable resources not used in a 'using' statement or try-with-resources. |
+| `res00g-not-in-using` | Flags closeable resources not used in a 'using' statement. |
 | `res00g-unsafe-close-in-finally` | Flags unsafe resource closing in finally blocks without null checks. |
 | `ser00g-unsafe-deserialization` | Flags ObjectInputStream.readObject() calls that lack an ObjectInputFilter allowlist, enabling gadget-chain RCE. |
 
@@ -3668,11 +4965,23 @@ are guaranteed to be closed even if an exception is thrown. Unmanaged resources
 lead to connection leaks, file handle exhaustion, and unpredictable behaviour under
 load.
 
-The following resource types are checked: `FileInputStream`,
-`FileOutputStream`, `BufferedReader`, `BufferedWriter`,
+This is a policy rule: a resource closed by hand in a `finally` is still
+flagged, because `using` is the required form.
+
+The following resource types (and their subtypes) are checked:
+`FileInputStream`, `FileOutputStream`, `FileReader`, `FileWriter`,
+`RandomAccessFile`, `BufferedReader`, `BufferedWriter`,
 `PrintWriter`, `PrintStream`, `InputStreamReader`,
-`OutputStreamWriter`, `Connection`, `Statement`,
+`OutputStreamWriter`, `ZipFile` (and `JarFile`),
+`GZIPInputStream`, `GZIPOutputStream`, `ZipInputStream`,
+`ZipOutputStream`, `Socket`, `ServerSocket`, `DatagramSocket`,
+`FileChannel`, `DirectoryStream`, `Connection`, `Statement`,
 `PreparedStatement`, `CallableStatement`, and `ResultSet`.
+
+Both `using` forms count: declaring the resource in the clause, or passing an
+existing local (`using (r)`). A `using (r)` inside a lambda does not count for a
+resource declared outside it, since the lambda may never run. Locals whose type cannot be
+resolved are not reported.
 
 ### Flagged
 ```gosu
@@ -3684,6 +4993,11 @@ reader.readLine()
 ```gosu
 using (var reader = new BufferedReader(new FileReader(path))) {
   reader.readLine()
+}
+
+var r = new FileReader(path)
+using (r) {
+  r.read()
 }
 ```
 
