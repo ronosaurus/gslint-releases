@@ -2,7 +2,7 @@
 
 > **Rule philosophy:** This project ships a curated set of language-level rules that work across any Gosu codebase. It serves as a foundational component for larger code quality efforts and will not reach feature parity with general-purpose linters. If you're building a Gosu framework or application platform, write custom rules targeting your domain APIs.
 
-100+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
+170+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
 
 <!-- BEGIN:rules -->
 ### dataflow
@@ -1783,6 +1783,7 @@ while (!queue.empty()) { // OK: computed condition
 | `floating-future` | Flags a Future-returning call whose result is discarded as a bare statement. |
 | `foreach-modify` | Flags collection mutations on the same collection being iterated in a foreach loop. |
 | `format-arg-count` | Flags String.format() calls where placeholder count does not match argument count. |
+| `frozen-log-level` | Flags static fields set from a logger level check (e.g. static var x = LOG.DebugEnabled), which freezes the log level. |
 | `future-get` | Flags Future.get() calls with no timeout argument (blocks the thread indefinitely). |
 | `gson-unsafe-type-dispatch` | Flags custom Gson deserializers that read a JSON type label and resolve classes dynamically from it. |
 | `hardcoded-hex-token` | Flags string literals containing long, high-entropy runs that may be hardcoded secrets or tokens. |
@@ -2445,6 +2446,64 @@ var msg = String.format("Name: %s, Age: %d", name, age)
 
 // Compliant - %% and %n do not consume arguments
 var msg = String.format("Rate: %.1f%% %n", rate)
+```
+
+</details>
+<details>
+<summary>frozen-log-level examples</summary>
+
+Flags `static` fields that are set from a logger level check, such as
+`static var _debug = LOG.DebugEnabled`, or assigned from one inside a function or
+constructor (`_debug = LOG.DebugEnabled`).
+
+A static field keeps one value for the life of the class. Storing
+`isDebugEnabled()` there freezes the log level at that moment: if the level is changed
+at runtime (logging framework reconfiguration, JMX, an admin console) the stored boolean never
+changes, so debug output cannot be switched on or off without restarting the application.
+Call the check at each use site instead - it is cheap, and always reflects the current level.
+
+Both the Java method form (`LOG.isDebugEnabled()`) and the Gosu property form
+(`LOG.DebugEnabled`) are recognised for the trace, debug, info, warn and error levels.
+`isLoggable(Level)` (java.util.logging) and `isEnabled(Level)` (Log4j 2) are
+recognised as method calls taking exactly one argument. A compound initializer such as
+`LOG.DebugEnabled and Config.Verbose` is reported once per field initializer or
+assignment statement.
+
+Only static fields are checked, and only plain assignments to them (not
+`MyClass.field = ...`). A function that just returns the check is fine, because it runs
+again on every call. Reading the level into a local variable is also fine, for example
+once before a tight loop in a small method: the value only lives for that one call, so it
+cannot go stale. The opposite problem - a log call with no level check at all -
+is covered by `unguarded-log-call`.
+
+```gosu
+// Noncompliant - level is read once at class load and never updated
+static var LOG = LoggerFactory.getLogger(MyClass)
+static var _debug = LOG.DebugEnabled
+
+// Noncompliant - same problem, set later from a function or constructor
+static function init() {
+  _debug = LOG.DebugEnabled
+}
+
+// Compliant - the check runs each time, so it follows runtime level changes
+static var LOG = LoggerFactory.getLogger(MyClass)
+
+function work() {
+  if (LOG.DebugEnabled) {
+    LOG.debug("state=" + describe())
+  }
+}
+
+// Compliant - a local lives for one call, so it cannot go stale
+function processAll(items : List<Item>) {
+  var debug = LOG.DebugEnabled
+  for (item in items) {
+    if (debug) {
+      LOG.debug("item=" + item)
+    }
+  }
+}
 ```
 
 </details>
