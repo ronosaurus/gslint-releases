@@ -14,6 +14,7 @@
 | `dead-null-check` | Flags a null check on a variable that is already provably non-null - just constructed, or already guarded by an earlier early-return check. |
 | `identity-return` | Flags functions that perform work but return their input parameter unchanged. |
 | `null-return` | Flags functions that return 'null' directly; prefer 'Optional' or an empty collection. |
+| `self-assignment` | Flags an assignment of a variable, field or property to itself, such as x = x or this.x = this.x. |
 | `unused-ctor-params` | Flags constructor parameters that are never read. |
 | `unused-private-member` | Flags private fields and functions that are never referenced within their top-level class. |
 
@@ -236,6 +237,44 @@ function findFirst() : String {
 
 </details>
 <details>
+<summary>self-assignment examples</summary>
+
+Flags an assignment of a variable, field or property to itself.
+
+`x = x` changes nothing. It is almost always a typo, and the common version is a
+constructor or setter whose parameter has the same name as the field: the author meant to copy
+the parameter into the field but wrote the parameter on both sides, so the field is never set.
+The same applies when a field is assigned from the property that reads it
+(`_label = Label` for `var _label : String as Label`), and to a chain such as
+`this._name = this._name`.
+
+Compound assignments such as `x += 1` change the value and are not flagged, and
+neither is a right side that calls something (`_name = _name.trim()`), because a call can
+return a different value.
+
+Mirrors the Gosu compiler warning `MSG_SILLY_ASSIGNMENT`, which is normally only
+visible in an IDE. The rule adds the member-chain forms (`this.x = this.x`,
+`other.x = other.x`) that the compiler does not check. Those forms are flagged only for
+plain fields; assigning a real property to itself (`bean.Name = bean.Name`) runs the
+setter, which is sometimes done on purpose, so it is left alone.
+
+```gosu
+// Noncompliant
+construct(name : String) {
+  name = name                  // the field is never set
+}
+function reset() {
+  this._name = this._name      // no effect
+}
+
+// Compliant
+construct(name : String) {
+  _name = name
+}
+```
+
+</details>
+<details>
 <summary>unused-ctor-params examples</summary>
 
 Detects constructor parameters that are never assigned or used within the
@@ -361,17 +400,21 @@ declaration line.
 
 | Token | Detects |
 |-------|---------|
-| `annotated-base` | Flags classes extending or implementing types with specified annotations *(disabled by default - activate with `--rules annotated-base`)* |
+| `annotated-base` | Flags classes extending or implementing types with specified annotations *(disabled by default - activate with `--enable-rules annotated-base`)* |
+| `constructor-calls-overridable` | Flags a constructor that calls a method a subclass could override, which runs before the subclass is initialized. |
 | `deep-inheritance` | Flags classes with deep superclass chains (default: >5) or too many direct interfaces (default: >5). |
 | `delegate-member-conflict` | Flags class methods that shadow delegate-synthesized forwarding methods. |
 | `duplicate-delegate` | Flags multiple delegate fields that represent the same interface. |
+| `enhancement-shadows-member` | Flags an enhancement member the enhanced type already has (never called), and a method that hides an enhancement method. |
 | `final-type-bound` | Flags generic type parameters whose upper bound is a final class, making the parameter pointless. |
 | `forbidden-extension` | Flags classes that extend a final or SPI-sealed Java base class directly. |
-| `forbidden-imports` | Flags uses statements that import types from forbidden packages (supports wildcards like 'sun.*'). Requires 'packages' config key. *(disabled by default - activate with `--rules forbidden-imports`)* |
-| `forbidden-types` | Flags configured forbidden types in field/local declarations and direct instantiations. *(disabled by default - activate with `--rules forbidden-types`)* |
+| `forbidden-imports` | Flags uses statements that import types from forbidden packages (supports wildcards like 'sun.*'). Requires 'packages' config key. *(disabled by default - activate with `--enable-rules forbidden-imports`)* |
+| `forbidden-types` | Flags configured forbidden types in field/local declarations and direct instantiations. *(disabled by default - activate with `--enable-rules forbidden-types`)* |
 | `hardcoded-crypto-key` | Flags string literals passed to SecretKeySpec, PBEKeySpec, DESedeKeySpec, or IvParameterSpec constructors. |
 | `logger-static` | Flags logger fields that are not static (should be shared across instances). |
 | `logger-string-arg` | Flags logger fields whose initializer passes a string literal argument (prefer class references or type tokens). |
+| `missing-override-modifier` | Flags a method or property accessor that replaces an inherited member, or implements an interface method, without 'override'. Disabled by default. *(disabled by default - activate with `--enable-rules missing-override-modifier`)* |
+| `mutable-static-field` | Flags non-final static var fields, a shared-state concurrency hazard. Disabled by default. *(disabled by default - activate with `--enable-rules mutable-static-field`)* |
 | `null-cipher` | Flags new NullCipher() instantiation - a no-op debugging stub that silently disables all encryption. |
 | `prefer-stringbuilder` | Flags StringBuffer usage; prefer StringBuilder which avoids unnecessary synchronization in single-threaded code. |
 | `public-field` | Flags public instance fields; prefer private fields with public getter/setter. |
@@ -384,7 +427,43 @@ declaration line.
 | `string-literal-arg` | Flags string literals and string constant fields passed to methods that also accept a feature literal (IPropertyInfo / IMethodInfo). Use a feature literal (#FeatureName) instead so the compiler validates the name. |
 | `threadlocal-static` | Flags 'ThreadLocal' fields that are not static (should be shared, not per-instance). |
 | `too-many-args` | Flags functions with more than the configured number of parameters (default: 5). |
+| `unused-uses` | Flags a uses statement whose type name never appears elsewhere in the file. |
 
+<details>
+<summary>constructor-calls-overridable examples</summary>
+
+Flags a constructor that calls a method a subclass could override.
+
+When you create a subclass, its parent's constructor runs first, before the subclass has set
+up its own fields. If that parent constructor calls an overridable method, Gosu runs the
+subclass's version of the method while the subclass is still half built, so it can read fields
+that are still `null` or zero. The bug is hard to spot because the parent class looks
+fine on its own.
+
+A call is fine when the method cannot be overridden: `private`, `final` or
+`static`. Calls inside a block are also left alone, because the block runs later. A
+constructor of a `final` class is never flagged, since nothing can subclass it.
+
+Mirrors the Gosu compiler warning `MSG_CALLING_OVERRIDABLE_FROM_CTOR`, which is
+normally only visible in an IDE. The rule adds the `final` class exemption and nothing else.
+
+```gosu
+class Base {
+  construct() {
+    init()                     // Noncompliant: a subclass can override init()
+  }
+  function init() { ... }
+}
+
+class Safe {
+  construct() {
+    init()                     // Compliant: private, cannot be overridden
+  }
+  private function init() { ... }
+}
+```
+
+</details>
 <details>
 <summary>deep-inheritance examples</summary>
 
@@ -446,6 +525,9 @@ Delegates are grouped by the interface's fully-qualified name, not its simple na
 two distinct interfaces that happen to share a simple name in different packages
 (`com.acme.billing.IFoo` vs. `com.acme.shipping.IFoo`) are not duplicates.
 
+A delegate whose interface does not resolve (it is missing from the classpath) is skipped:
+two different missing interfaces look identical to the type system, so they cannot be compared.
+
 ### Flagged
 ```gosu
 delegate _a represents IFoo
@@ -456,6 +538,53 @@ delegate _b represents IFoo   // duplicate-delegate
 ```gosu
 delegate _a represents IFoo
 delegate _b represents IBar   // distinct interfaces - OK
+```
+
+</details>
+<details>
+<summary>enhancement-shadows-member examples</summary>
+
+Flags an enhancement member that can never be called, and a method that hides an enhancement
+method.
+
+**Shadowed enhancement member.** An enhancement adds members to an existing type, but it
+cannot replace one the type already has. If the type already defines `length()`, the
+type's own version always wins and the enhancement's `length()` is dead code that looks
+live. The same applies to a property, and to the methods every type inherits from
+`Object`: an enhancement `toString()` on any other type is never called. A method
+with the same name but a different parameter list is a new overload and is fine.
+
+**A JDK upgrade can create these.** A shadow does not have to be a mistake when the
+enhancement was written. An enhancement that adds a method the JDK lacked becomes dead code the
+day a newer JDK adds a method with the same name and parameters, because from then on the JDK's
+version wins. Gosu's own standard-library `String.repeat(int)` enhancement is an example: it
+is shadowed on Java 11 and later. The two versions can also disagree on edge cases (that
+enhancement treats a negative count as zero, while the JDK's `repeat` throws), so after an
+upgrade the callers are now running the JDK's behavior even though the enhancement still reads
+as if it applies. The rule compares against the members of the JDK it runs on, so analyze under
+the JDK you deploy on.
+
+**Hidden enhancement method.** If a class declares a method with the same signature as an
+enhancement method on its parent type, which one runs depends on the declared type of the
+variable (enhancement methods are chosen at compile time), so the same object can behave
+differently depending on how it is declared. Rename one of them.
+
+Mirrors the Gosu compiler warnings `MSG_CANNOT_OVERRIDE_FUNCTIONS_IN_ENHANCEMENTS`,
+`MSG_CANNOT_OVERRIDE_PROPERTIES_IN_ENHANCEMENTS` and
+`MSG_MASKING_ENHANCEMENT_METHODS_MAY_BE_CONFUSING`, which are normally only visible in an
+IDE. Silent when the enhanced type cannot be resolved.
+
+```gosu
+// Noncompliant
+enhancement MyStringEnhancement : String {
+  function length() : int { return 1 }       // String.length() always wins
+  function toString() : String { return "x" } // Object.toString() always wins
+}
+
+// Compliant
+enhancement MyStringEnhancement : String {
+  function shoutLoudly() : String { return this.toUpperCase() + "!" }
+}
 ```
 
 </details>
@@ -595,6 +724,68 @@ var _logger = MyFramework.LOGIN.createSubLogger("LoginHelper")
 // Compliant - class reference used instead
 var _logger = MyFramework.LOGIN.createSubLogger(LoginHelper)
 ```
+
+</details>
+<details>
+<summary>missing-override-modifier examples</summary>
+
+Flags a member that replaces an inherited member without the `override` modifier.
+
+Gosu lets a child class replace a parent's method, property accessor, or an interface method
+without writing `override`. That compiles, but it removes a safety net: with the keyword,
+renaming or deleting the parent member makes the child fail to compile; without it, the child's
+method quietly becomes a new, unrelated one and the old behavior silently stops being
+overridden. Writing `override` also tells the reader the method is called through the
+parent type.
+
+Constructors, overloads that take a different parameter list, and genuinely new members are
+not flagged. Methods inherited from `Object` (`toString`, `equals`,
+`hashCode`) and methods implementing an interface are flagged, as the compiler does.
+
+Mirrors the Gosu compiler warning `MSG_MISSING_OVERRIDE_MODIFIER`, which is normally
+only visible in an IDE.
+
+```gosu
+class Base { function greet() : String { return "hi" } }
+
+class Child extends Base {
+  function greet() : String { ... }            // Noncompliant: add 'override'
+  override function greet() : String { ... }   // Compliant
+}
+```
+
+</details>
+<details>
+<summary>mutable-static-field examples</summary>
+
+Flags a `static var` field that is not declared `final`. A static field is shared
+by every request thread in the JVM, so a reassignable one is a common source of races and of
+state leaking from one request to the next.
+
+```gosu
+// Noncompliant - shared, reassignable state
+static var _retryCount : int = 0
+static var _lastRun : Date
+
+// Compliant - the reference cannot change
+static final var DEFAULT_PORT : int = 8080
+
+// Compliant - not shared across threads by construction
+var _retryCount : int = 0
+
+// Not reported here - UPPER_SNAKE_CASE names belong to mutable-constant
+static var MAX_RETRY : int = 3
+```
+
+Disabled by default. Plenty of legitimate code has a non-final static field
+(lazy singletons, counters, caches, registries), and this rule does not try to tell those
+apart. Enable it with `--enable-rules mutable-static-field`, and silence an intentional
+case with `@SuppressWarnings("gslint:mutable-static-field")` on the field or the class.
+
+The check ignores the field's type, so a `static var` holding a thread-safe object
+such as `AtomicInteger` is still reported: the reference itself can be reassigned.
+A `static final` field holding a mutable object is not reported here; the type-based
+rules such as `static-hashmap` cover that.
 
 </details>
 <details>
@@ -952,6 +1143,35 @@ by the supertype contract, so the implementor has no freedom to reduce the argum
 count.
 
 </details>
+<details>
+<summary>unused-uses examples</summary>
+
+Flags a `uses` statement whose type name never appears in the rest of the file.
+
+Detection is lexical and conservative: an import is reported only when its simple name
+(the last segment, e.g. `ArrayList` for `java.util.ArrayList`) is not written
+anywhere else in the file. Any identifier with that name counts as a use, including one in a
+comment or Javadoc `{@link}`, in a string literal, or inside a fully-qualified name, so
+the rule can miss an unused import but does not report a used one.
+
+Not flagged: wildcard imports (`uses java.util.*`) and feature-space imports
+(`uses java.lang.Math#*`), whose members are used without naming the type.
+
+```gosu
+// Noncompliant
+uses java.util.ArrayList
+class A {
+  var _names : List<String>
+}
+
+// Compliant
+uses java.util.ArrayList
+class A {
+  var _names = new ArrayList<String>()
+}
+```
+
+</details>
 
 ### duplication
 
@@ -964,6 +1184,7 @@ count.
 | Token | Detects |
 |-------|---------|
 | `catch-null-reference` | Flags catch blocks that catch 'NullPointerException' or 'NullReferenceException'. |
+| `catch-throwable` | Flags catch blocks that catch exactly 'Throwable' or 'Error' without rethrowing the caught exception. |
 | `debug-only-catch` | Flags catch blocks containing only debug/trace log calls, which are (usually) silent in production and equivalent to empty catches. |
 | `empty-catch` | Flags catch blocks with no statements (swallowed exceptions). |
 | `empty-finally` | Flags finally blocks with no meaningful statements. |
@@ -1000,6 +1221,49 @@ if (record != null) { var name = record.Name }
 
 var name = getRecord()?.Name        // null-safe call
 var name = getRecord()?.Name ?: ""  // elvis fallback
+```
+
+</details>
+<details>
+<summary>catch-throwable examples</summary>
+
+Flags `catch` blocks that catch exactly `Throwable` or `Error`.
+
+Both types also cover `OutOfMemoryError`, `StackOverflowError` and
+`LinkageError`. Code almost never recovers from those, and swallowing them turns a loud
+failure into silent corruption. Catch the specific exception you can handle instead.
+
+Only the exact types are flagged: `Exception`, `OutOfMemoryError`,
+`AssertionError` and other subclasses are not. A catch is also left alone when it ends by
+propagating the caught object - either `throw e` or a wrapper that keeps it as the cause,
+`throw new X("context", e)` - because nothing is swallowed. A throw that drops the cause,
+or one inside an `if`, does not count.
+
+The wrapper exemption is a heuristic: the rule sees that `e` is passed to the
+constructor, not that the constructor keeps it. A custom exception that accepts a
+`Throwable` and discards it is still treated as wrapped.
+
+```gosu
+// Noncompliant
+try {
+  doWork()
+} catch (e : Throwable) {
+  log(e)                     // swallows OutOfMemoryError too
+}
+
+// Compliant
+try {
+  doWork()
+} catch (e : Throwable) {
+  cleanup()
+  throw e                    // rethrown
+}
+
+try {
+  doWork()
+} catch (e : Throwable) {
+  throw new RuntimeException("doWork failed", e)   // wrapped, cause kept
+}
 ```
 
 </details>
@@ -1287,15 +1551,17 @@ are skipped conservatively to avoid false positives.
 |-------|---------|
 | `blank-line-before-else` | Flags else/else-if clauses separated from the closing '}' by a blank line. |
 | `complex-boolean` | Flags boolean expressions with too many operators (default threshold: 3). |
-| `constant-branch` | Flags if/else, ternary, and switch statements whose condition references configured constants. *(disabled by default - activate with `--rules constant-branch`)* |
+| `constant-branch` | Flags if/else, ternary, and switch statements whose condition references configured constants. *(disabled by default - activate with `--enable-rules constant-branch`)* |
 | `duplicate-branch-code` | Flags if/else branches with identical or near-identical code blocks. |
 | `duplicate-condition` | Flags if/else-if chains where the same condition appears more than once. |
+| `empty-control-body` | Flags if/else/while/do/for bodies with no statements (including a stray ';'). |
 | `logical-and-style` | Flags inconsistent spacing or style around logical AND ('&&') operators. |
 | `logical-or-style` | Flags inconsistent spacing or style around logical OR ('\|\|') operators. |
 | `missing-braces` | Flags 'if'/'for'/'while' bodies not wrapped in braces (can cause statement-merging bugs). |
 | `prefer-safe-navigation` | Flags null-guard chains that can be simplified using Gosu's '?.' safe-navigation operator. |
 | `redundant-condition` | Flags 'if' conditions that always evaluate the same way, or boolean comparisons that can be simplified. |
 | `single-case-switch` | Flags switch statements with only one case clause - replace with an if statement. |
+| `switch-case-fallthrough` | Flags a switch case whose last statement does not always end it, so execution falls into the next case. |
 | `switch-default` | Flags 'switch' statements missing a 'default' branch. |
 | `switch-exhaustiveness-check` | Flags a switch over an enum that omits both a default clause and one or more enum constants. |
 | `too-many-comparisons` | Flags conditions with too many comparison operators (default threshold: 3). |
@@ -1477,6 +1743,60 @@ report it as a missed branch (0% branch coverage).
 
 </details>
 <details>
+<summary>empty-control-body examples</summary>
+
+Flags an `if`, `else`, `while`, `do-while` or `for` whose body has no
+statements. The most valuable catch is the stray semicolon: `if (x);` is a complete
+statement, so the code after it always runs.
+
+This is the control-flow counterpart of `empty-catch` and takes the same comment options.
+
+```gosu
+// Noncompliant
+if (isReady) { }
+if (isReady);                    // stray semicolon: the next line always runs
+doWork()
+if (isReady) { doWork() } else { }
+while (running);
+for (item in items) { }
+
+// Compliant
+if (isReady) { doWork() }
+while (queue.poll() != null) { } // drains the queue: the condition does the work
+if (isReady) {
+  // intentionally empty - see ticket 1234    (only with allowCommentedBody=true)
+}
+```
+
+**Loop exemption.** A braced empty `while`, `do-while` or `for` is left alone when its
+condition (or the `for` iterable) calls something, because the loop is then doing its work
+in the condition: `while (queue.poll() != null) { }`. This is a deliberate heuristic, not a
+proof that the call runs: a call in one branch of `flag && poll()` still counts, and a
+property read does not count even though a getter can run code. A call that only appears inside a
+lambda the condition builds but never invokes does not count either. A proven bare semicolon is
+never exempt, so `while (poll());` is still flagged.
+
+**Configuration** (same meaning as for `empty-catch`):
+
+  - `allowCommentedBody=true` - a body whose braces hold only comments is not flagged.
+      Default `false`.
+  - `allowedCommentPatterns=intentional,expected` - suppress only when a comment inside the
+      braces contains one of the listed substrings (case-insensitive, comma-separated). When set,
+      `allowCommentedBody` is ignored for comments that match no pattern.
+
+Only a comment inside the braces counts. A comment before the opening brace, in the header, or after
+the closing brace does not, and a bare `;` body can never be excused.
+
+**Not flagged:** empty function or constructor bodies (stubs, overrides), empty lambdas,
+empty `switch` cases (deliberate fall-through), and empty `try` / `using`.
+A body that holds only a variable declaration is not empty either.
+
+**Overlaps.** `missing-braces` also reports `if (c);` (no braces), and
+`while-literal-condition` also reports `while (true) { }`; the findings differ, so
+both are kept. `do { } while (true)` is reported only here.
+
+</details>
+<details>
 <summary>missing-braces examples</summary>
 
 Flags `if` and `else` branches that omit curly braces.
@@ -1494,6 +1814,33 @@ if (condition)
 Both `if` bodies and `else` bodies are checked. `else if`
 chains are handled naturally - each `if` in the chain is checked
 independently by the AST collector.
+
+Configuration (both keys are optional; the defaults flag every brace-free body):
+
+  - `allowSingleLine` (default `false`) - when `true`, a brace-free body that
+      starts and ends on one source line is allowed. For an `if` that is the line holding
+      the closing parenthesis of the condition; for an `else` it is the line holding the
+      `else` keyword. A body that runs over several lines is still flagged, and so is a
+      one-liner whose body sits on the line below the condition or keyword.
+  - `maxLength` (default `0`, meaning no limit) - only used together with
+      `allowSingleLine`. A one-liner is allowed only if its whole source line, including
+      indentation and any code beside the body (such as a closing brace before `else`), is at most this many
+      characters; longer ones are reported with the line length. A negative or non-numeric
+      value is treated as no limit.
+
+Example: `--rule-config missing-braces:allowSingleLine=true,maxLength=80`
+
+```gosu
+// Noncompliant (default config)
+if (user == null) return
+
+// Compliant with allowSingleLine=true
+if (user == null) return
+
+// Still noncompliant with allowSingleLine=true: the body is on the next line
+if (user == null)
+    return
+```
 
 </details>
 <details>
@@ -1640,6 +1987,46 @@ switch (code) {         // OK: default-only switch (no case clauses at all)
 
 </details>
 <details>
+<summary>switch-case-fallthrough examples</summary>
+
+Flags a `switch` case that runs on into the next case.
+
+In Gosu, like Java, a case does not stop at the next `case` label. Unless something
+ends it, execution carries on into the following case's statements. That is occasionally
+intended, but far more often it is a forgotten `break` that makes two cases both run.
+
+A case is fine when its last statement always ends it: `break`, `return`,
+`throw`, `continue`, or an `if`/`else` where every branch does one of
+those. A `break` that only happens sometimes (inside an `if` with no `else`)
+does not count. Several labels sharing one body (`case 1: case 2: ...`) are not
+fall-through, and the last case in the switch is never flagged.
+
+Mirrors the Gosu compiler warning `MSG_NONTERMINAL_CASE_CLAUSE`, which is normally
+only visible in an IDE.
+
+```gosu
+// Noncompliant
+switch (n) {
+  case 1:
+    print("one")          // falls into case 2
+  case 2:
+    print("two")
+    break
+}
+
+// Compliant
+switch (n) {
+  case 1:
+    print("one")
+    break
+  case 2:
+    print("two")
+    break
+}
+```
+
+</details>
+<details>
 <summary>switch-exhaustiveness-check examples</summary>
 
 Flags a `switch` statement over an enum-typed expression that covers neither every enum
@@ -1773,8 +2160,9 @@ while (!queue.empty()) { // OK: computed condition
 | `deprecated-override` | Flags Gosu overrides of @Deprecated methods (Java, or Gosu with checkGosuDeprecated). |
 | `deprecated-usage` | Flags calls to or reads of @Deprecated methods or fields, or construction of @Deprecated classes. |
 | `duplicate-null-check` | Flags redundant null checks on the same variable in the same code path. |
-| `dynamic-receiver` | Flags method calls, property accesses, and declarations whose type is dynamic.Dynamic - they bypass type-based lint and taint analysis. *(disabled by default - activate with `--rules dynamic-receiver`)* |
+| `dynamic-receiver` | Flags method calls, property accesses, and declarations whose type is dynamic.Dynamic - they bypass type-based lint and taint analysis. *(disabled by default - activate with `--enable-rules dynamic-receiver`)* |
 | `equals-hashcode-contract` | Flags classes that override equals() without hashCode() (or vice versa), or overload equals with a non-Object parameter. |
+| `equals-self-comparison` | Flags this == o inside equals(Object): in Gosu == calls equals(), so any other object recurses until the stack overflows. |
 | `exception-as-string` | Flags explicit 'e as String' casts on Throwable subtypes - use getMessage() or pass the exception to the logger directly. |
 | `expensive-construction-in-loop` | Flags SimpleDateFormat, MessageDigest, DocumentBuilderFactory and ObjectMapper instances created inside a loop. |
 | `explicit-gc` | Flags System.gc() and Runtime.getRuntime().gc() calls (the JVM should manage GC; explicit calls cause unpredictable pauses). |
@@ -1792,6 +2180,7 @@ while (!queue.empty()) { // OK: computed condition
 | `hardcoded-uuid` | Flags string literals matching UUID shapes (canonical 8-4-4-4-12 dashed form or 32-char compact hex). |
 | `identity-compare-on-value` | Flags === and !== on String, boxed numerics, BigDecimal, or BigInteger; these compare by reference, not value. |
 | `immutable-collection-null` | Flags null arguments passed to immutable collection factories ('List.of', 'Set.of', 'Map.of'). |
+| `incompatible-equality` | Flags == or != between types the compiler rejects, such as String == Integer or int == null. *(disabled by default - activate with `--enable-rules incompatible-equality`)* |
 | `indexed-removal` | Flags 'list.remove(i)' by index during for-each iteration (causes element skipping). |
 | `inline-collection-call` | Flags method calls made directly on an inline collection or map literal  |
 | `insecure-random` | Flags 'new java.util.Random()' - use SecureRandom for security-sensitive randomness. |
@@ -1801,6 +2190,7 @@ while (!queue.empty()) { // OK: computed condition
 | `interval-boundary-confusion` | Flags inclusive (..) ranges with .size()/.length upper bound - likely needs exclusive (..\|). |
 | `jackson-default-typing` | Flags ObjectMapper.enableDefaultTyping() and activateDefaultTyping() calls that allow gadget-chain deserialization attacks. |
 | `java-final-override` | Flags Gosu overrides of final Java methods. |
+| `java-style-cast` | Flags a Java-style cast like (String) o; in Gosu the cast is 'o as String'. |
 | `lock-not-in-finally` | Flags lock() calls in a try body whose finally block is missing or lacks unlock(); deadlock risk. |
 | `log-entry-exit` | Flags trace/debug entry and exit log calls at function boundaries. |
 | `malformed-string-interpolation` | Flags string interpolation with mismatched or incorrect syntax. |
@@ -1812,20 +2202,22 @@ while (!queue.empty()) { // OK: computed condition
 | `prefer-object-utils` | Flags null-check chains and null defaults that a single ObjectUtils call can replace. |
 | `prefer-string-utils` | Flags hand-written empty, blank, default, trim and equalsIgnoreCase checks that a single StringUtils call can replace. |
 | `process-spawn` | Flags Runtime.exec() and new ProcessBuilder(...) calls (OS process spawning is fragile and a source of command-injection vulnerabilities). |
+| `pure-result-unused` | Flags a bare call to an immutable or pure method (s.trim(), date.plusDays(1), list.orderBy(...)) whose returned value is thrown away. |
 | `redundant-size-check` | Flags redundant size comparisons that are always true or always false. |
 | `reflection-use` | Flags Java java.lang.reflect.* calls and Gosu TypeSystem.* calls that bypass compile-time type safety. |
 | `regex-bad-pattern` | Flags regex patterns with ReDoS risk, invalid character ranges, or trivially broad wildcards. |
 | `regex-compile-in-loop` | Flags Pattern.compile() and implicit regex compilation (matches/replaceAll/replaceFirst) inside loops. |
+| `static-member-via-instance` | Flags a static property or field accessed through an object instead of its type. Disabled by default. *(disabled by default - activate with `--enable-rules static-member-via-instance`)* |
 | `synchronized-method` | Flags 'synchronized' method modifiers; prefer explicit lock objects. |
 | `synchronized-override` | Flags Gosu overrides that silently drop synchronization from a Java synchronized method. |
 | `system-exit` | Flags 'System.exit()', 'Runtime.exit()' and 'Runtime.halt()' calls (usually a mistake in library code). |
-| `system-property-env-scope` | Flags System.getProperty/getenv calls outside configured packages or classes. *(disabled by default - activate with `--rules system-property-env-scope`)* |
-| `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--rules thread-primitives`)* |
+| `system-property-env-scope` | Flags System.getProperty/getenv calls outside configured packages or classes. *(disabled by default - activate with `--enable-rules system-property-env-scope`)* |
+| `thread-primitives` | Flags direct use of Thread, Runnable, ExecutorService and related threading primitives. Disabled by default: legitimate in framework code; enable for application-layer modules only. *(disabled by default - activate with `--enable-rules thread-primitives`)* |
 | `thread-sleep` | Flags 'Thread.sleep()' and 'TimeUnit.sleep()' calls (usually a mistake; use events or futures instead). |
 | `tomap-no-merge` | Flags 'toMap()' without a merge function on non-unique keys (throws exception at runtime). |
 | `tostring-misuse` | Flags incorrect use of '.toString()' on arrays, streams, and optional objects. |
 | `unguarded-log-call` | Flags log.debug() and log.trace() calls not wrapped in isDebugEnabled()/isTraceEnabled() guards. |
-| `unsafe-static-formatter` | Flags static SimpleDateFormat/DateFormat fields; these are thread-unsafe and should be instance-level or use java.time.format.DateTimeFormatter. *(disabled by default - activate with `--rules unsafe-static-formatter`)* |
+| `unsafe-static-formatter` | Flags static SimpleDateFormat/DateFormat fields; these are thread-unsafe and should be instance-level or use java.time.format.DateTimeFormatter. *(disabled by default - activate with `--enable-rules unsafe-static-formatter`)* |
 | `xxe-unsafe-factory` | Flags DocumentBuilderFactory.newInstance() not followed by setFeature(FEATURE_SECURE_PROCESSING, true) - XML parsers are XXE-vulnerable by default. |
 | `zip-slip` | Flags ZipEntry.getName() used as a file path without canonicalization, enabling directory traversal via crafted ZIP archives. |
 
@@ -2179,6 +2571,49 @@ class Widget {
   override function hashCode() : int {
     return _id
   }
+}
+```
+
+</details>
+<details>
+<summary>equals-self-comparison examples</summary>
+
+Flags `this == other` (or `other == this`) inside `equals(Object)`.
+
+In Gosu the `==` operator calls `equals()` (after a quick check that both sides
+are not the very same object, and that neither is `null`). Inside `equals(Object)`
+itself, comparing `this` with the parameter using `==` therefore works when the
+argument is the same object, but for any other non-null argument it calls `equals()` again
+with the same arguments, which runs the same comparison, and so on until the stack overflows. So
+the bug hides until the first time two different objects are compared. In Java the same line is a
+harmless shortcut, which is why it is easy to carry over by habit. Use `===` to compare
+identity (the same object).
+
+Both operand orders are flagged, and so is `!=`. Comparing the parameter with
+something other than `this` (for example a field of a local copy), a different method
+named `equals` (another parameter type, or a static two-argument helper), and `===`
+are all fine.
+
+Mirrors the Gosu compiler warning `MSG_WARN_ON_SUSPICIOUS_THIS_COMPARISON`, which is
+normally only visible in an IDE. The rule additionally checks that the method really is an
+instance `equals(Object)` and that the operands are `this` and that method's own
+parameter.
+
+```gosu
+// Noncompliant
+override function equals(o : Object) : boolean {
+  if (this == o) {            // for a different object, calls equals() again - infinite recursion
+    return true
+  }
+  ...
+}
+
+// Compliant
+override function equals(o : Object) : boolean {
+  if (this === o) {           // identity comparison
+    return true
+  }
+  ...
 }
 ```
 
@@ -2747,6 +3182,36 @@ list.add(null)                         // mutable operation - not a factory call
 
 </details>
 <details>
+<summary>incompatible-equality examples</summary>
+
+Flags a `==` or `!=` whose operand types the compiler rejects, such as
+`String == Integer`, `File == Date`, `List == Map` or `int == null`.
+
+Meant for code that has not been compiled yet, for example code written by a language model:
+the Gosu compiler reports these comparisons as errors, but gslint keeps going after an error and
+would otherwise say nothing about them. The rule reads the compiler's own verdict, so it flags
+exactly the comparisons the compiler refuses and never a pair that Gosu converts implicitly.
+
+Off by default; turn it on with `--enable-rules incompatible-equality`.
+
+Not flagged: pairs the compiler accepts (`Integer == Long`, `BigDecimal == int`),
+a reference type compared with `null` (`Integer == null`), strict identity
+(`===` and `!==`), and any comparison with an operand whose type could not be resolved.
+
+```gosu
+// Noncompliant
+if (name == count) { ... }       // String compared with Integer
+if (file == createdOn) { ... }   // File compared with Date
+if (retries == null) { ... }     // retries is an int, which is never null
+
+// Compliant
+if (name == count.toString()) { ... }
+if (retries == 0) { ... }
+if (boxedRetries == null) { ... }   // Integer can be null
+```
+
+</details>
+<details>
 <summary>indexed-removal examples</summary>
 
 Detects when list.remove(index) is called where the index is the loop variable
@@ -2755,6 +3220,10 @@ of an enclosing for-each iteration.
 Calling remove(index) during iteration by index causes index shifting: if you remove
 the element at index 3, elements 4+ shift left, so the next iteration processes the
 wrong element.
+
+Only a `java.util.List` is checked. `Set.remove(i)` and `Map.remove(i)`
+remove by value or key, so nothing shifts, and a receiver whose type is missing from the
+classpath is left alone because it cannot be told apart from those.
 
 ### Flagged - calling remove(i) where i is the for-each loop variable
 ```gosu
@@ -3008,6 +3477,31 @@ class MyList extends AbstractList<String> {
 
 </details>
 <details>
+<summary>java-style-cast examples</summary>
+
+Flags a Java-style cast such as `(String) o`.
+
+Gosu casts with `as`: `o as String`. A type in parentheses before an expression is
+not a cast in Gosu. The compiler guesses what was meant and treats it as a type conversion, which
+can behave differently from the checked cast a Java developer expects (a conversion may change the
+value, a cast only changes how it is viewed). Writing `as` says what you mean.
+
+Not flagged: the Gosu `as` cast, and ordinary parentheses around an expression such as
+`(a + b) * 2` or `(a) + 1`.
+
+Mirrors the Gosu compiler warning `MSG_LIKELY_JAVA_CAST`, which is normally only
+visible in an IDE.
+
+```gosu
+// Noncompliant
+var s = (String) o
+
+// Compliant
+var s = o as String
+```
+
+</details>
+<details>
 <summary>lock-not-in-finally examples</summary>
 
 Flags `lock()` calls inside a `try` body when the enclosing
@@ -3171,7 +3665,8 @@ them more specific advice than "override toString()" would. Enum receivers are a
 `Enum.toString()` is itself a real override (it returns the constant's name), so an enum
 constant is never missing a meaningful `toString()`. Abstract-class and interface
 receivers are skipped too - the runtime object is always a concrete subtype that may supply
-its own `toString()`.
+its own `toString()`. So is a class whose superclass is missing from the classpath: the
+superclass may override `toString()`, and there is no way to see it.
 
 ```gosu
 class Widget {
@@ -3351,6 +3846,64 @@ myService.exec(query)   // unrelated exec() call on a non-Runtime type
 
 </details>
 <details>
+<summary>pure-result-unused examples</summary>
+
+Flags a call used as a bare statement when the call has no effect other than the value it
+returns, so throwing the value away throws the whole call away.
+
+The classic mistake is expecting an in-place change from a type that cannot change:
+`s.trim()` returns a new String, it never edits `s`. Gosu adds a second trap:
+`list.orderBy(...)` returns a new sorted list, while `list.sort(...)` sorts the
+list in place, so writing `orderBy` as a statement silently does nothing.
+
+What is checked, always by resolved type and never by method name alone:
+
+  - Instance methods of immutable value types: `String`, `BigDecimal`,
+      `BigInteger`, and the `java.time` types `LocalDate`,
+      `LocalDateTime`, `LocalTime`, `ZonedDateTime`, `OffsetDateTime`,
+      `Instant`, `Duration` and `Period`.
+  - `Optional.map`, `flatMap`, `filter`, `or`, `orElse` and
+      `orElseGet`.
+  - Gosu collection enhancements that build a new value: `orderBy`,
+      `orderByDescending`, `thenBy`, `where`, `map`, `flatMap`,
+      `toList`, `toSet`, `partition`, `concat`, `union`,
+      `reverse`, `mapValues` and similar, plus value-returning queries such as
+      `firstWhere` and `countWhere`.
+
+```gosu
+// Noncompliant - trim() returns a new String, the result is thrown away
+name.trim()
+
+// Noncompliant - orderBy returns a new list, it does not sort 'people'
+people.orderBy(\ p -> p.Name)
+
+// Noncompliant - plusDays returns a new LocalDate, 'due' is unchanged
+due.plusDays(1)
+
+// Compliant - the result is kept
+name = name.trim()
+var sorted = people.orderBy(\ p -> p.Name)
+
+// Compliant - sort() sorts the list in place, so a bare statement is correct
+people.sort(\ a, b -> a.Name < b.Name)
+```
+
+Calls that take a block (`where`, `map`, `flatMap`, `partition` and
+similar) run the block immediately in Gosu, so a discarded `list.map(\ x -> save(x))`
+does perform the saves. The message for those calls says so and suggests `each()`, which
+is the right tool when the block is run for its side effects.
+
+Not flagged: `sort`, `sortBy`, `sortByDescending` and `shuffle`
+(they change the list in place), `each` and other void calls, `Optional.orElseThrow`
+(commonly used as an assertion), `single` and `singleWhere` (they throw by design
+when there is not exactly one match), static calls, mutable types such as
+`StringBuilder` and the collections, user-written enhancements, calls on unresolved
+types, `*.` expansion calls (see `expansion-result-unused`), and calls in the body
+of a `try` that has a `catch`, where a discarded call such as
+`nullString.charAt(0)` is a deliberate way to provoke an exception.
+
+</details>
+<details>
 <summary>redundant-size-check examples</summary>
 
 Detects redundant comparisons of collection.size() against non-negative bounds.
@@ -3524,6 +4077,37 @@ function process(items : List<String>) {
       trivial single-character delimiters where the overhead is negligible and
       flagging would produce too much noise.
   - Handles for-each, while, and do-while loops.
+
+</details>
+<details>
+<summary>static-member-via-instance examples</summary>
+
+Flags a static property or field read through an object instead of through its type.
+
+A static member belongs to the type, so there is only one copy no matter how many objects
+exist. Writing `inst.COUNT` or `this.COUNT` makes it look like each object has its
+own value, which misleads the reader and hides that changing it affects every user of the type.
+Write `MyType.COUNT` (or just `COUNT` from inside the class).
+
+Only static properties and fields are flagged. Calling a static method through an
+instance is not, because the Gosu compiler does not warn about that.
+
+Mirrors the Gosu compiler warnings `MSG_NON_STATIC_ACCESS_OF_STATIC_MEMBER` and
+`MSG_NON_STATIC_ACCESS_WITH_IDENTIFIER_OF_STATIC_MEMBER`, which are normally only visible
+in an IDE.
+
+```gosu
+class Counter {
+  static var COUNT : int
+
+  function bump(other : Counter) : int {
+    return other.COUNT          // Noncompliant: reads a static through an object
+  }
+  function read() : int {
+    return Counter.COUNT        // Compliant
+  }
+}
+```
 
 </details>
 <details>
@@ -4114,34 +4698,36 @@ function getUser(id : int) {
 | `anonymous-class` | Flags 'new IFoo() { ... }' anonymous class instantiations of SAM interfaces.  |
 | `block-parameter-ignored` | Flags lambda/block parameters that are declared but never referenced in the body. |
 | `call-in-expansion` | Flags direct function calls inside ${} template expressions. |
-| `comment-density` | Flags source files whose comment-to-code ratio falls below the configured  *(disabled by default - activate with `--rules comment-density`)* |
+| `comment-density` | Flags source files whose comment-to-code ratio falls below the configured  *(disabled by default - activate with `--enable-rules comment-density`)* |
 | `constant-naming` | Flags constants not using UPPER_CASE naming convention. |
 | `constructor-order` | Flags constructors that are not ordered from most-specific to least-specific parameters. |
 | `embedded-tab` | Flags string literals containing a literal tab character (use \t instead). |
-| `enhancement-modifies-state` | Flags enhancement methods that mutate the enhanced type's fields via this.field = ... *(disabled by default - activate with `--rules enhancement-modifies-state`)* |
+| `enhancement-modifies-state` | Flags enhancement methods that mutate the enhanced type's fields via this.field = ... *(disabled by default - activate with `--enable-rules enhancement-modifies-state`)* |
 | `excessive-newlines` | Flags excessive consecutive blank lines in code (default threshold: 2). |
 | `field-order` | Flags field declarations that appear after constructors or methods. |
-| `file-header` | Checks that every source file has a comment header (// or /* */)  *(disabled by default - activate with `--rules file-header`)* |
+| `file-header` | Checks that every source file has a comment header (// or /* */)  *(disabled by default - activate with `--enable-rules file-header`)* |
 | `foreach-index-math` | Flags manual counter variables incremented inside for-each loops - use the built-in 'index' clause instead. |
 | `indent-alignment` | Flags statements whose indentation is inconsistent with the majority of their siblings in the same block. |
 | `long-line` | Flags source lines exceeding the configured maximum length (default: 150 characters). |
-| `max-file-size` | Flags source files exceeding the configured maximum size (default: 200 KB). *(disabled by default - activate with `--rules max-file-size`)* |
+| `max-file-size` | Flags source files exceeding the configured maximum size (default: 200 KB). *(disabled by default - activate with `--enable-rules max-file-size`)* |
 | `max-function-lines` | Flags functions or constructors whose source span exceeds the configured maximum (default: 120 lines). |
-| `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--rules max-lines`)* |
-| `max-ncss` | Flags source files whose non-commenting source statement count  *(disabled by default - activate with `--rules max-ncss`)* |
-| `missing-newline-at-eof` | Flags source files that do not end with a newline character. *(disabled by default - activate with `--rules missing-newline-at-eof`)* |
+| `max-lines` | Flags source files exceeding the configured maximum number of lines (default: 25,000). *(disabled by default - activate with `--enable-rules max-lines`)* |
+| `max-ncss` | Flags source files whose non-commenting source statement count  *(disabled by default - activate with `--enable-rules max-ncss`)* |
+| `missing-newline-at-eof` | Flags source files that do not end with a newline character. *(disabled by default - activate with `--enable-rules missing-newline-at-eof`)* |
 | `mutable-constant` | Flags static var fields with UPPER_SNAKE_CASE names that are not declared final. |
 | `nested-ternary` | Flags ternary expressions whose then/else branch is itself a ternary; use if/else blocks instead. |
 | `new-in-expansion` | Flags object allocation (new) inside ${} template expressions. |
 | `override-grouping` | Flags '@Override' methods that are not grouped together with other overrides. |
 | `package-naming` | Flags package names containing uppercase characters. |
 | `print-statement` | Flags 'print' and 'println' statements; use a logging framework instead. |
+| `property-getter-parens` | Flags 'property get X : T { ... }' getters, whose bodies static analysis cannot see; use 'property get X() : T'. *(disabled by default - activate with `--enable-rules property-getter-parens`)* |
 | `property-vs-method` | Flags trivial properties that should use Gosu's 'var X : T' shorthand. |
+| `redundant-cast` | Flags a cast that cannot change anything: 'x as T' where x already has type T, or a widening cast whose target type is already fixed. Disabled by default. *(disabled by default - activate with `--enable-rules redundant-cast`)* |
 | `regex-simplifiable` | Flags str.matches() or str.replaceAll() where a built-in String method (equals, contains, startsWith, endsWith, replace) would be clearer and safer. |
 | `stack-trace-in-template` | Flags Throwable.getStackTrace() / .StackTrace reads inside ${} - the array stringifies to garbage; pass the throwable to the logger instead. |
 | `string-plus-in-expansion` | Flags string concatenation (+) with a string literal inside ${} template expressions. |
 | `this-consistency` | Flags inconsistent use of 'this' qualifier on member access within a class. |
-| `undocumented-complex-function` | Flags functions whose cyclomatic complexity meets or exceeds minScore (default: 10)  *(disabled by default - activate with `--rules undocumented-complex-function`)* |
+| `undocumented-complex-function` | Flags functions whose cyclomatic complexity meets or exceeds minScore (default: 10)  *(disabled by default - activate with `--enable-rules undocumented-complex-function`)* |
 | `void-in-string-template` | Flags void-returning calls inside ${} template interpolations - the interpolation will be empty. |
 
 <details>
@@ -4471,6 +5057,9 @@ static var retryCount : int = 0
 var MAX_VALUE : int = 100
 ```
 
+For a non-final static var with any other name, see `mutable-static-field`
+(disabled by default).
+
 </details>
 <details>
 <summary>nested-ternary examples</summary>
@@ -4550,6 +5139,43 @@ package myapp.core          // Compliant
 
 </details>
 <details>
+<summary>property-getter-parens examples</summary>
+
+Flags explicit property getters written without parentheses, {@code property get Name : T
+{ ... }}, and asks for the equivalent `property get Name() : T { ... }`.
+
+Both forms compile to the same property, but Gosu does not keep the body of the
+paren-less form in its syntax tree. Lint rules, the `complexity` metrics, and the
+dependency graph used by `quality` cannot see inside it, so a bug or a complex branch
+in such a getter goes unreported. With parentheses the body is a normal function body that
+every check inspects.
+
+Disabled by default, because both forms are valid Gosu. Enable it with
+`--enable-rules property-getter-parens` in codebases that rely on gslint as a check.
+
+### Examples
+```gosu
+// Flagged - the body is invisible to static analysis
+property get DisplayName : String {
+  return _first + " " + _last
+}
+
+// Not flagged - same getter with parentheses
+property get DisplayName() : String {
+  return _first + " " + _last
+}
+
+// Not flagged - no body to inspect
+var _name : String as Name
+abstract property get Code : String
+```
+
+Also not flagged: getters declared in an interface (they have no body), setters (a
+setter always has parentheses), and getters carrying
+`@SuppressWarnings("gslint:property-getter-parens")`.
+
+</details>
+<details>
 <summary>property-vs-method examples</summary>
 
 Detects trivial properties that simply wrap a backing field with no added logic.
@@ -4602,6 +5228,52 @@ property set Name(v : String) {
 Not flagged either: getters that return another property instead of a backing field,
 and `override` getters (they implement an inherited contract, and the shorthand
 cannot be marked `override`).
+
+</details>
+<details>
+<summary>redundant-cast examples</summary>
+
+Flags a cast that cannot change anything: `x as T` where `x` already has exactly
+the type `T`, or where `x` has a subtype of `T` and the result goes somewhere
+whose type is already decided.
+
+A cast earns its place when it narrows (`o as String` from an `Object`), converts
+(`n as String` from an `int`) or boxes. A cast to the type the value already has
+(`s as String`) does nothing and suggests a conversion is happening when it is not.
+
+Casting to a supertype is only flagged where the result type is already fixed: a
+`return`, an assignment to an existing variable or field, or a `var` with a declared
+type. Elsewhere such a cast can matter, so it is left alone:
+
+  - as a call argument it can choose which overload runs (`describe(list as Object)`);
+  - in `var v = list as List` it decides the type of `v`;
+  - as a receiver, `(list as List).size()` views the object through that type,
+      which also decides which enhancement methods are visible.
+
+Casts of number literals (`1.0 as float`), narrowing, conversions, boxing and unboxing,
+`null as T`, and casts involving an unresolved type are not flagged.
+
+Based on the Gosu compiler warning `MSG_UNNECESSARY_COERCION`, which is normally only
+visible in an IDE. The compiler warns on every cast to an assignable type; this rule keeps the
+ones that cannot change behavior.
+
+```gosu
+// Noncompliant
+function name(s : String) : String {
+  return s as String                    // already a String
+}
+function items(list : ArrayList<String>) : List<String> {
+  return list as List<String>           // the return type already says List
+}
+
+// Compliant
+function asString(o : Object) : String {
+  return o as String                    // narrowing: a real cast
+}
+function pick(list : ArrayList<String>) : String {
+  return describe(list as Object)       // chooses the describe(Object) overload
+}
+```
 
 </details>
 <details>
@@ -4819,6 +5491,13 @@ private var _tags : String[] as Tags  // Different issue; caller can reassign
 private var _manager : Object as readonly Manager  // Separate rule
 ```
 
+### Not flagged - property with an explicit getter body
+```gosu
+property get Tags : String[] {  // OK - the getter decides what callers get
+  return _tags.copyOf(_tags.length)
+}
+```
+
 </details>
 <details>
 <summary>cls01g-readonly-reference examples</summary>
@@ -4854,6 +5533,13 @@ private var _item : Object as Item  // Caller can reassign, intentional
 ### Not flagged - readonly array property (covered by separate rule)
 ```gosu
 private var _tags : String[] as readonly Tags  // Separate rule
+```
+
+### Not flagged - property with an explicit getter body
+```gosu
+property get Items : List<String> {  // OK - the getter decides what callers get
+  return new ArrayList<String>(_items)
+}
 ```
 
 </details>
