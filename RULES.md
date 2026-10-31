@@ -2,7 +2,7 @@
 
 > **Rule philosophy:** This project ships a curated set of language-level rules that work across any Gosu codebase. It serves as a foundational component for larger code quality efforts and will not reach feature parity with general-purpose linters. If you're building a Gosu framework or application platform, write custom rules targeting your domain APIs.
 
-170+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
+185+ rules across several categories, listed alphabetically. Each section shows the CLI rule token, what it detects (including any configurable options), and FAIL/PASS examples drawn from the test fixtures.
 
 <!-- BEGIN:rules -->
 ### dataflow
@@ -234,6 +234,9 @@ function findFirst() : String {
   return null    // not checked - return type is not a collection/array
 }
 ```
+
+A null return inside a lambda or anonymous class belongs to that callable, not
+the enclosing collection function. This rule does not check a lambda's own return type.
 
 </details>
 <details>
@@ -1313,6 +1316,70 @@ resolve is the receiver expression's text tested the same way.
 
 </details>
 <details>
+<summary>empty-catch examples</summary>
+
+Detects empty `catch` blocks in Gosu source files.
+
+A catch block is considered empty (a violation) when it lacks meaningful error handling.
+This includes both syntactically empty blocks and blocks that contain only variable
+declarations with no action (no throw, return, method call, or assignment).
+
+**Syntactically empty:** null, no-op, or statement list with no statements.
+
+**Semantically empty:** Contains only variable declarations, e.g.
+`var msg : String = e.Message`, which declare storage but don't actually handle or report
+the exception. The rule requires at least one meaningful action: a throw, return, method call
+statement, or assignment to existing state. A declaration does not count even when its
+initializer calls something: `var msg = e.getMessage()` is the classic swallowed
+exception and cannot be told apart from `var r = report(e)` without knowing which calls
+have side effects.
+
+**Configuration:**
+
+  - `allowCommentedCatch=true` - treat any comment-only catch block as
+      intentionally suppressed (not flagged).
+  - `allowedCommentPatterns=expected,intentional` - suppress the violation only when
+      a comment in the catch block contains one of the listed substrings (case-insensitive,
+      comma-separated). When this option is set, `allowCommentedCatch` is ignored for
+      catches whose comments do not match any pattern.
+
+Comments are read from inside the catch body's braces only. A comment in the catch header
+(between the parentheses) does not excuse the block, and only a syntactically empty body can be
+excused: a catch that is empty merely because it holds do-nothing declarations is always
+flagged.
+
+See `empty-control-body` for the same check on `if`, `else` and loop bodies.
+### Flagged
+```gosu
+try {
+  load()
+} catch (e : IOException) {
+}
+
+try {
+  load()
+} catch (e : IOException) {
+  var msg = e.Message        // declaration only: still swallowed
+}
+```
+
+### Not flagged
+```gosu
+try {
+  load()
+} catch (e : IOException) {
+  LOG.warn("load failed", e)   // handled: logged
+}
+
+try {
+  load()
+} catch (e : IOException) {
+  throw new RuntimeException(e)
+}
+```
+
+</details>
+<details>
 <summary>empty-finally examples</summary>
 
 Detects empty `finally` blocks in Gosu source files.
@@ -2027,6 +2094,74 @@ switch (n) {
 
 </details>
 <details>
+<summary>switch-default examples</summary>
+
+Ensures every `switch` statement:
+
+  - Has a `default` clause.
+  - The `default` clause is the last case in the switch.
+
+### Why require a default?
+A switch without a default silently does nothing for unmatched values.
+The default clause acts as an explicit "catch-all" and documents the
+intent for unhandled values.
+
+### Why require default to be last?
+Convention and readability - readers expect to scan cases top-to-bottom
+and find the fallback at the end. A default buried in the middle is easy
+to miss and confuses fall-through semantics.
+
+### Detection strategy
+
+  - **Missing default:** `ISwitchStatement.getDefaultStatements() == null`
+  - **Default not last:** The Gosu parser absorbs any case clauses that
+      follow a `default:` label into `getDefaultStatements()` as
+      `INoOpStatement`s. This rule detects those absorbed clauses by
+      checking whether any `INoOpStatement` in the default block
+      corresponds to a source line matching `case :`.
+
+### Flagged
+```gosu
+// No default: an unexpected value silently does nothing
+switch (status) {
+  case "NEW":
+    start()
+    break
+  case "DONE":
+    finish()
+    break
+}
+
+// default is not the last clause
+switch (status) {
+  case "NEW":
+    start()
+    break
+  default:
+    ignore()
+    break
+  case "DONE":
+    finish()
+    break
+}
+```
+
+### Not flagged
+```gosu
+switch (status) {
+  case "NEW":
+    start()
+    break
+  case "DONE":
+    finish()
+    break
+  default:
+    throw new IllegalStateException("Unexpected status: " + status)
+}
+```
+
+</details>
+<details>
 <summary>switch-exhaustiveness-check examples</summary>
 
 Flags a `switch` statement over an enum-typed expression that covers neither every enum
@@ -2191,7 +2326,7 @@ while (!queue.empty()) { // OK: computed condition
 | `jackson-default-typing` | Flags ObjectMapper.enableDefaultTyping() and activateDefaultTyping() calls that allow gadget-chain deserialization attacks. |
 | `java-final-override` | Flags Gosu overrides of final Java methods. |
 | `java-style-cast` | Flags a Java-style cast like (String) o; in Gosu the cast is 'o as String'. |
-| `lock-not-in-finally` | Flags lock() calls in a try body whose finally block is missing or lacks unlock(); deadlock risk. |
+| `lock-not-in-finally` | Flags lock() calls in a try body whose finally block is missing or lacks a matching unlock(); deadlock risk. |
 | `log-entry-exit` | Flags trace/debug entry and exit log calls at function boundaries. |
 | `malformed-string-interpolation` | Flags string interpolation with mismatched or incorrect syntax. |
 | `manual-stream-copy` | Flags loops containing both read() and write() calls; use a stream copy utility instead. |
@@ -2272,6 +2407,38 @@ Configuration:
   - `allowHashCode` (boolean, default `false`) - when `true`, bitwise
       operators inside a `hashCode` function are not flagged. Bitwise ops are idiomatic
       in manual `hashCode` implementations (e.g. `result = 31 * result ^ field`).
+
+</details>
+<details>
+<summary>concurrenthashmap-contains examples</summary>
+
+Detects ConcurrentHashMap.contains(key) and recommends containsKey(key) instead.
+
+`ConcurrentHashMap.contains(x)` is a legacy `Hashtable` method that tests the
+values, not the keys. Code that reads like a key lookup silently searches the wrong thing.
+
+### Flagged
+```gosu
+var map : ConcurrentHashMap = new ConcurrentHashMap()
+if (map.contains(key)) {      // looks like a key check, but searches values
+  print("found")
+}
+```
+
+### Not flagged
+```gosu
+if (map.containsKey(key)) {   // explicit key lookup
+  print("found")
+}
+
+var list = new ArrayList()
+if (list.contains(x)) {       // contains() is correct on a List
+  print("found")
+}
+
+var plain : java.util.Map = new ConcurrentHashMap()
+plain.contains(key)           // not valid Gosu (Map has no contains()); the receiver is typed Map, never matched
+```
 
 </details>
 <details>
@@ -2823,7 +2990,7 @@ CompletableFuture.supplyAsync(work).whenComplete(\ r, ex -> report(r, ex))
 
 Detects when a collection is mutated while being iterated in a for-each loop.
 
-Calls to add, addAll, remove, removeAll, clear, set, retainAll, addFirst, addLast,
+Calls to add, addAll, remove, removeAll, clear, retainAll, addFirst, addLast,
 removeFirst, removeLast on the same collection variable that is the iterable in the
 enclosing for-each loop cause ConcurrentModificationException.
 
@@ -2854,8 +3021,10 @@ function example() {
 
 ### Scope limitation
 
-Only detects when the iterable is a simple identifier (e.g. "list"). Field access
-(e.g. "this._list" or "_items.subList()") are skipped as out of scope.
+Tracks identifiers and field chains, including mixed `this._list`/`_list`
+spellings. Different receiver chains are kept separate; aliases and method-returned
+collections are not tracked. Element replacement via `List.set()` is not structural
+and is not flagged.
 
 </details>
 <details>
@@ -3506,7 +3675,22 @@ var s = o as String
 
 Flags `lock()` calls inside a `try` body when the enclosing
 `try-finally` block is absent or its `finally` clause contains
-no `unlock()` call.
+no matching `unlock()` call for each acquired receiver.
+
+Receiver matching covers identifiers and field chains, including mixed implicit and
+`this.`-qualified fields. Aliases and reassignment are not tracked, so a lock acquired
+through a local copy (`var l = _lock; l.lock()`) and released as `_lock.unlock()`
+is reported even though it is the same lock. When either side is computed, such as
+`getLock().lock()`, an unlock in finally is accepted conservatively because the rule
+cannot establish whether the receivers differ.
+
+This is a presence check per receiver, not a count of runtime acquisitions. Mutually
+exclusive branches and balanced release/reacquire sequences must not be mistaken for
+reentrant locking. Reentrant hold counts are therefore not checked. Cleanup in nested
+finally blocks also counts, even when a statement that can throw runs between the
+`lock()` and the nested `try` and would leave the lock held. Acquisitions and
+releases inside deferred lambdas do not count toward the enclosing try. This rule does not
+prove control-flow coverage.
 
 If an exception is thrown between `lock()` and `unlock()`,
 the lock is never released and any thread that subsequently tries to acquire
@@ -4290,6 +4474,8 @@ duplicate keys.
 strategy for handling duplicate keys: the collector throws immediately. The three-argument
 form `toMap(keyMapper, valueMapper, mergeFunction)` lets the caller decide how to
 combine duplicate values, making it safe for data where key uniqueness is not guaranteed.
+Only resolved `java.util.stream.Collectors` receivers are checked; unrelated domain
+methods named `toMap` and unresolved receivers are left alone.
 
 ### Flagged
 ```gosu
@@ -4372,27 +4558,17 @@ LOG.info("server started")            // OK: info/warn/error not guarded
 
 ### Configuration
 
-  KeyTypeDefaultDescription
-  
-    `allowCheapArgs`
-    boolean
-    `false`
-    When `true`, unguarded debug/trace calls whose arguments are all
-        "cheap" (string/numeric/boolean literals, feature literals, local variables
-        of primitive or String type, concatenation of cheap values, or template
-        strings with only cheap interpolations) are not flagged. Property accesses
-        and method calls are always considered expensive.
-  
-  
-    `cheapTypes`
-    string (comma-separated)
-    empty
-    Additional fully-qualified type names to treat as cheap when
-        `allowCheapArgs` is enabled. Useful for structured logging where
-        arguments like `Map` or `List` are passed by reference and
-        never stringified. Generics are stripped before matching, so
-        `java.util.Map` matches `Map`.
-  
+  - `allowCheapArgs` (boolean, default `false`) - when `true`,
+      unguarded debug/trace calls whose arguments are all "cheap" (string/numeric/boolean
+      literals, feature literals, local variables of primitive or String type,
+      concatenation of cheap values, or template strings with only cheap interpolations)
+      are not flagged. Property accesses and method calls are always considered
+      expensive.
+  - `cheapTypes` (comma-separated, default empty) - additional fully-qualified
+      type names to treat as cheap when `allowCheapArgs` is enabled. Useful for
+      structured logging where arguments like `Map` or `List` are passed by
+      reference and never stringified. Type arguments are stripped before matching, so a
+      parameterized map matches `java.util.Map`.
 
 Usage: `--rule-config unguarded-log-call:allowCheapArgs=true,cheapTypes=java.util.Map`
 
@@ -4500,6 +4676,7 @@ function extractPass(outputDir : File, entry : ZipEntry) : File {
 | Token | Detects |
 |-------|---------|
 | `command-injection` | Detects function parameters that flow to Runtime.exec() or new ProcessBuilder() without sanitization. Best-effort heuristic, not a sound/complete taint-tracking engine. |
+| `hidden-unicode` | Flags bidirectional control and invisible Unicode characters that make source display differently from how it compiles. |
 | `log-injection` | Detects unsanitized HTTP request values flowing to log calls - enables log injection attacks via newline characters. Best-effort heuristic, not a sound/complete taint-tracking engine. |
 | `path-traversal` | Detects function parameters flowing to file-system operations without proper validation. Best-effort heuristic, not a sound/complete taint-tracking engine. |
 | `sql-injection` | Detects function parameters flowing to SQL execution without proper parameterization. Best-effort heuristic, not a sound/complete taint-tracking engine. |
@@ -4535,6 +4712,114 @@ function safeRun() {
   Runtime.getRuntime().exec("ls -la")
 }
 ```
+
+</details>
+<details>
+<summary>hidden-unicode examples</summary>
+
+Flags bidirectional control characters, invisible characters, odd line breaks and raw control
+characters in Gosu source - the characters that make code display differently from how
+it compiles ("Trojan Source").
+
+**Why it matters.** Bidirectional (bidi) controls change the order in which an editor,
+diff view or review page shows text without changing the order the compiler reads it, so an
+`if` check can look like part of a comment (or the reverse). Zero-width characters make
+two names that look identical different to the compiler. U+2028, U+2029 and U+0085 start a new
+line in some viewers, but Gosu ends a line only at a newline. Raw control characters such as
+backspace or ESC act on a terminal when the file is shown with `cat` or `git diff`.
+
+**Gosu is looser than Java here.** The Gosu tokenizer treats every character at or above
+U+0100 as part of a word, so an invisible character in code silently becomes part of an
+identifier. Control characters below U+0020 count as whitespace in code, and the C1 controls
+U+0080 to U+009F are a parse error.
+
+**Character sets.** Each character belongs to one tier; the first matching tier wins.
+
+  - **Bidi** - U+202A-U+202E and U+2066-U+2069. Flagged everywhere.
+  - **Line breaks** - U+2028, U+2029, U+0085. Flagged everywhere.
+  - **Control** - C0 and C1 controls except tab and newline, plus DEL. Flagged everywhere.
+      A form feed (U+000C), once used as a page break in old files, is flagged too.
+  - **Joiners and marks** - ZWNJ, ZWJ, LRM, RLM and the Arabic letter mark. Flagged in code
+      and comments; allowed in strings by default because Persian, Indic and emoji text need them.
+  - **Invisible** - every other Unicode Default_Ignorable_Code_Point (zero-width space, BOM,
+      soft hyphen, Hangul fillers, variation selectors, tag characters, ...). Flagged in code and
+      comments; flagged in strings unless listed in `allowInStrings`.
+  - **Odd spaces** - no-break space and the other look-alike spaces. Flagged in code only,
+      where Gosu treats them as part of a name; fine in comments and strings.
+
+Characters inside an embedded `${ }` expression count as code, so the string
+allowlist never applies there. Bidi, line-break and control characters cannot be allowlisted:
+every one has an escape form that keeps a string's value the same.
+
+One exception is built in: the England, Scotland and Wales flag emoji (a black flag, a tag
+spelling `gbeng`, `gbsct` or `gbwls`, and a cancel tag) are allowed in strings.
+Any other run of tag characters is flagged, since tags can spell a hidden message. Supplementary
+variation selectors (U+E0100 block, used for kanji glyph variants) are flagged in strings by
+default; add them to `allowInStrings` if your strings need them.
+
+```gosu
+// Noncompliant - a zero-width space (U+200B) sits between "Ad" and "min", so this is a
+// different variable from isAdmin. The raw character would appear inside the name.
+var isAd<U+200B>min = false
+
+// Compliant - visible text, or an explicit escape inside a string
+var isAdmin = false
+var label = "a\u200Bb"
+```
+
+Write a hidden character inside a string as an escape such as `\u200B`. A single
+escape holds one UTF-16 unit, so a code point of U+10000 or above needs two (a surrogate pair):
+`\uDB40\uDC67` is U+E0067.
+
+Each offending line gets one finding listing every distinct code point once, grouped by
+where it sits (code, comment, string literal). Messages show characters as `U+XXXX` and
+their Unicode name, never raw.
+
+Configuration: `--rule-config hidden-unicode:allowInStrings=default,00AD,E0100-E01EF` - a
+comma-separated list of hex code points allowed inside strings. An entry is a single code point
+(`00AD` or `U+00AD`), an inclusive range (`E0100-E01EF`), or `default`,
+which stands for the built-in list `200C,200D,200E,200F,061C,FE0E,FE0F` so you can add to
+it instead of retyping it. Without `default` the value replaces the built-in list, and an
+empty value allows nothing. It applies only to the joiner and invisible tiers.
+
+Suppression: a class-level `@SuppressWarnings("gslint:hidden-unicode")` silences the
+file. A function-level annotation is not honored; use the baseline file instead.
+
+**Not flagged:** emoji and other visible non-ASCII text (including non-Latin identifiers);
+escape sequences written as plain visible text; U+FFFD from undecodable bytes; tab, newline
+and the CR of a CRLF pair; private-use characters; unassigned code points; the format characters
+Unicode keeps visible (U+0600-U+0605, U+06DD, U+070F, U+0890-U+0891, U+08E2, U+110BD, U+110CD and
+U+FFF9-U+FFFB); stacked combining marks.
+
+**Limits.** Which characters are invisible or bidi controls comes from Unicode's published
+properties (linked below); which of them are flagged in code, comments and strings, and the
+default allowlist, are gslint's own choices and may be wrong for some text. The comment and
+string detection is a lightweight scan, not the compiler's tokenizer. The rule does not detect
+look-alike letters from other scripts, and a clean result does not guarantee that the code
+displays the way it compiles.
+
+Not detected:
+
+  - Look-alike letters from other scripts (Cyrillic U+0430 vs Latin a), the "confusables" problem in UTS #39.
+  - Characters added after Unicode 18.0, unless they fall in a range Unicode already reserves as default-ignorable.
+  - Files gslint does not lint: properties files, XML, build scripts, Java sources.
+  - Up to two leading UTF-8 byte-order marks, which the file reader removes before the rule sees the text.
+  - An embedded expression whose opening dollar sign or brace is itself written as an escape,
+      when the expression body also contains escapes (a quote or comment marker written as an
+      escape): the scan reads the body as typed, so it can report a joiner as code that Gosu
+      reads as string text, or allow one that Gosu reads as comment text. Bidi, line-break and
+      control characters are flagged either way.
+  - Context edge cases from the lightweight scan: `.gst` template text is classified
+      as string context, a scriptlet is code, and a `%>` inside a string inside a
+      scriptlet is read as ordinary string text.
+
+References:
+
+  - Unicode Bidirectional Algorithm (UAX #9), for the bidi tier: https://www.unicode.org/reports/tr9/
+  - Unicode Security Mechanisms (UTS #39), guidance on invisible and confusable characters: https://www.unicode.org/reports/tr39/
+  - Unicode Line Breaking Algorithm (UAX #14), which classes U+2028, U+2029 and U+0085 as mandatory breaks: https://www.unicode.org/reports/tr14/
+  - Default_Ignorable_Code_Point data (invisible tier): https://www.unicode.org/Public/18.0.0/ucd/DerivedCoreProperties.txt
+  - Bidi_Control data (bidi tier): https://www.unicode.org/Public/18.0.0/ucd/PropList.txt
 
 </details>
 <details>
@@ -4695,7 +4980,7 @@ function getUser(id : int) {
 | Token | Detects |
 |-------|---------|
 | `ambiguous-call-args` | Flags call sites with 3+ boolean or null literal arguments; suggests named parameters. |
-| `anonymous-class` | Flags 'new IFoo() { ... }' anonymous class instantiations of SAM interfaces.  |
+| `anonymous-class` | Flags 'new IFoo() { ... }' anonymous class instantiations of single-abstract-method (SAM) interfaces.  |
 | `block-parameter-ignored` | Flags lambda/block parameters that are declared but never referenced in the body. |
 | `call-in-expansion` | Flags direct function calls inside ${} template expressions. |
 | `comment-density` | Flags source files whose comment-to-code ratio falls below the configured  *(disabled by default - activate with `--enable-rules comment-density`)* |
@@ -4756,6 +5041,53 @@ The threshold is configurable via `--rule-config ambiguous-call-args:minAmbiguou
 (default: 3). Setting it to 1 flags even single-boolean calls like `setEnabled(true)`.
 
 CLI token: `ambiguous-call-args`
+
+</details>
+<details>
+<summary>anonymous-class examples</summary>
+
+Flags Java-style anonymous class instantiations (`new IFoo() { ... }`) when the target
+type is a SAM (Single Abstract Method) interface, and suggests using a Gosu block expression
+(`\ args -> { body }`) instead.
+
+A SAM interface is one with exactly one method to implement, such as `Runnable`
+(`run()`) or `Callable` (`call()`); that single method is what a block supplies.
+
+Gosu blocks are automatically matched to SAM interfaces by the compiler, making them the
+idiomatic Gosu substitute for the Java anonymous-class pattern. This rule only fires when a
+mechanical substitution is possible - it stays silent when the block form cannot apply:
+
+  - **Abstract class target:** `new AbstractFoo() { ... }` - Gosu blocks implement
+      interfaces only; extending an abstract class requires the anonymous-class form.
+  - **Multi-method interface:** Gosu blocks implement exactly one method; if the interface
+      declares more than one non-`Object` method, a block cannot replace it.
+
+Known limitation: this rule cannot detect whether the anonymous class body declares fields
+or requires `this`-references (e.g. for recursive callbacks). In those rare cases the
+suggestion in the violation message does not apply; suppress with `@SuppressWarnings`.
+### Flagged
+```gosu
+var r = new Runnable() {          // SAM interface: one abstract method
+  override function run() {
+    print("doing work")
+  }
+}
+```
+
+### Not flagged
+```gosu
+var r : Runnable = \ -> print("doing work")   // already a block
+
+// Abstract class, not an interface: a block cannot replace it
+static var _fmt : ThreadLocal<SimpleDateFormat> = new ThreadLocal<SimpleDateFormat>() {
+  override function initialValue() : SimpleDateFormat {
+    return new SimpleDateFormat("yyyy-MM-dd")
+  }
+}
+
+// Iterator has several methods (hasNext, next, remove): one block cannot implement them all
+var it = new Iterator<String>() { ... }
+```
 
 </details>
 <details>
@@ -5277,6 +5609,71 @@ function pick(list : ArrayList<String>) : String {
 
 </details>
 <details>
+<summary>regex-simplifiable examples</summary>
+
+Flags `str.matches()` and `str.replaceAll()` calls where a
+simpler built-in `String` method would express the same intent more
+clearly - and in the case of `replaceAll`, more safely.
+
+### Background: String.matches() anchors implicitly
+
+`String.matches(regex)` behaves like
+`Pattern.matches(regex, str)`, which requires the regex to match the
+entire string. This means:
+
+  - `s.matches("hello")` is exactly equivalent to
+      `"hello".equals(s)`.
+  - `s.matches(".*hello.*")` is equivalent to
+      `s.contains("hello")`.
+  - `s.matches("hello.*")` is equivalent to
+      `s.startsWith("hello")`.
+  - `s.matches(".*hello")` is equivalent to
+      `s.endsWith("hello")`.
+
+The plain `String` methods are faster (no regex engine), clearer in
+intent, and harder to misread.
+
+### replaceAll with a literal pattern is a common bug
+
+`str.replaceAll(".", "x")` replaces every character because
+`.` is a regex metacharacter. The developer almost certainly meant
+`str.replace(".", "x")`, which treats the first argument as a literal
+string. This rule flags any `replaceAll` call whose pattern argument
+contains no regex metacharacters, suggesting `replace()` instead.
+
+### Patterns checked for matches()
+
+  - `s.matches("literal")` - no metacharacters → `"literal".equals(s)`
+  - `s.matches(".*literal.*")` - literal middle → `s.contains("literal")`
+  - `s.matches("literal.*")` - literal prefix → `s.startsWith("literal")`
+  - `s.matches(".*literal")` - literal suffix → `s.endsWith("literal")`
+
+### Not checked
+
+  - `split()` - semantics differ from indexOf/contains in important ways.
+  - `replaceFirst()` - simpler replacement (no simple String equivalent).
+  - Anchored literal patterns like `"^hello$"` - marginal benefit and
+      requires anchor stripping to detect.
+
+### Flagged
+```gosu
+s.matches("hello")               // use "hello".equals(s)
+s.matches(".*foo.*")             // use s.contains("foo")
+s.matches("foo.*")               // use s.startsWith("foo")
+s.matches(".*bar")               // use s.endsWith("bar")
+s.replaceAll("hello", "world")   // use s.replace("hello", "world")
+```
+
+### Not flagged
+```gosu
+s.matches("[0-9]+")              // real regex: character class
+s.matches("foo|bar")             // real regex: alternation
+s.replaceAll("[ ]+", " ")        // real regex: run of spaces
+s.replaceAll(".", "x")           // "." is a metacharacter, so regex semantics may be intended
+```
+
+</details>
+<details>
 <summary>stack-trace-in-template examples</summary>
 
 Flags references to `Throwable.getStackTrace()` or its property-style alias
@@ -5728,6 +6125,17 @@ existing local (`using (r)`). A `using (r)` inside a lambda does not count for a
 resource declared outside it, since the lambda may never run. Locals whose type cannot be
 resolved are not reported.
 
+Resources the function does not own are not reported either, because closing them is a bug:
+the servlet request and response bodies (`getReader`, `getInputStream`,
+`getWriter`, `getOutputStream` on `javax.servlet` and `jakarta.servlet`
+`ServletRequest` / `ServletResponse`), `System.in`, `System.out`,
+`System.err` and `Console.writer()`. This covers both the method and the property
+spelling (`resp.getWriter()` and `resp.Writer`), and a stream that wraps one of
+these as its first constructor argument. Add your own with
+`--rule-config res00g-not-in-using:extraOwnedSources=com.acme.Pool#borrowConnection`,
+a comma-separated list of `TypeFqn#member` entries; the receiver may be that type or a
+subtype.
+
 ### Flagged
 ```gosu
 var reader = new BufferedReader(new FileReader(path))  // not in a using block
@@ -5743,6 +6151,45 @@ using (var reader = new BufferedReader(new FileReader(path))) {
 var r = new FileReader(path)
 using (r) {
   r.read()
+}
+
+var out = response.Writer   // the servlet container closes it
+out.print(html)
+```
+
+</details>
+<details>
+<summary>res00g-unsafe-close-in-finally examples</summary>
+
+Detects close() calls in finally blocks that are not wrapped in their own try-catch.
+
+This rule identifies a simpler pattern: if a finally block contains close() calls,
+it should also contain nested try-catch statements to protect them. A finally block
+with close() calls but NO nested try-catch is flagged as unsafe.
+
+If an unprotected `close()` throws, the exception replaces any error from the
+`try` body and the remaining `close()` calls are skipped, leaking those resources.
+Only receivers that resolve to `AutoCloseable` or `Closeable` are counted.
+
+### Flagged
+```gosu
+var conn : Connection = null
+var stmt : Statement = null
+try {
+  conn = getConn()
+  stmt = conn.createStatement()
+  process(stmt)
+} finally {
+  stmt?.close()    // a throw here skips conn.close()
+  conn?.close()
+}
+```
+
+### Not flagged
+```gosu
+} finally {
+  try { stmt?.close() } catch (e : SQLException) { LOG.warn("close failed", e) }
+  try { conn?.close() } catch (e : SQLException) { LOG.warn("close failed", e) }
 }
 ```
 
