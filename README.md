@@ -98,7 +98,7 @@ Individual violations are flagged with `[⚠ type-incomplete]` in text output an
 
 ## Rule Reference
 
-See [RULES.md](RULES.md) for a comprehensive reference of all 150+ linting rules. For complexity metrics (cyclomatic and cognitive complexity), see [COMPLEXITY.md](COMPLEXITY.md).
+See [RULES.md](RULES.md) for a comprehensive reference of all 185+ linting rules. For complexity metrics (cyclomatic and cognitive complexity), see [COMPLEXITY.md](COMPLEXITY.md).
 
 ## Command-Line Usage
 
@@ -128,6 +128,19 @@ java -jar gslint.jar --include "src/**/*.gs" --src-root src
 
 # Also accepted on Windows, but not portable to Unix CI and not religiously tested
 java -jar gslint.jar --include "src\**\*.gs" --src-root src
+```
+
+### Wildcards in option values (Windows)
+
+On Windows, `java.exe` itself expands any argument containing `*` into the names of matching files in the current folder before gslint starts, and quoting does not prevent it. So `--rules "manifold*"` or `--enable-rules "redundant-*"` silently breaks when a file with a matching name sits in the folder you run from, and a bare `*` always does. (On Linux and macOS only the shell expands, so quoting the pattern is enough.) To pass a wildcard through untouched, put the options in an argument file, one token per line, and run `java -jar gslint.jar @args.txt`:
+
+```text
+--include
+src
+--init-src-root
+src
+--enable-rules
+*
 ```
 
 ### Running without the uber JAR
