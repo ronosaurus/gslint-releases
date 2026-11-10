@@ -2,7 +2,7 @@
 
 Source-level static analysis for the [Gosu](https://gosu-lang.github.io/) programming language. Parses `.gs`, `.gsx`, `.gst`, and `.gsp` source files using the Gosu compiler's own AST API (`gw.lang.parser.*`) and reports violations in Text, JSON, SARIF.
 
-- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, 1.18.5, **1.18.7**, 1.18.8, 1.18.12
+- Tested Gosu versions: 1.14.16, 1.14.29, 1.15.7, 1.17.13, 1.18.5, **1.18.7**, 1.18.8, 1.18.14
 - Gosu has been a stable language for over a decade so there should be flexibility with running a linter built for **1.18.7** against files designed for a previous version
 - Targets Java 11 bytecode for gosu-core parity; usable on JDK 11, 17, 21; peeked at upcoming 1.20.0-SNAPSHOT (JDK 25)
 
@@ -25,6 +25,8 @@ The focus is on the public `gw.lang.*` interface hierarchy, with occasional dips
 
 When the Gosu compiler cannot resolve a referenced type because its JAR is not on the classpath, it substitutes `gw.lang.reflect.IErrorType`.
 Rules that inspect types will see `ErrorType` instead of the real type, which means type-dependent rules (e.g., `raw-type`, `res00g-*`) may silently miss violations or produce lower-confidence results.
+
+If results look incomplete, see [Troubleshooting and Noise Control](#troubleshooting-and-noise-control).
 
 ### Specifying source roots: `--src-root`
 
@@ -104,16 +106,16 @@ See [RULES.md](RULES.md) for a comprehensive reference of all 185+ linting rules
 
 ```bash
 # Common case: analyze a source directory recursively
-java -jar gslint.jar --include src
+java -jar gslint.jar --include src --init-src-root src
 
 # Common case: pass a glob directly (quote to prevent shell expansion)
-java -jar gslint.jar --include "src/**/*.gs"
+java -jar gslint.jar --include "src/**/*.gs" --init-src-root src
 
 # Single file
-java -jar gslint.jar --include src/foo/Bar.gs
+java -jar gslint.jar --include src/foo/Bar.gs --init-src-root src
 
 # Mixed: multiple include patterns and a single file
-java -jar gslint.jar --include "src/main/**/*.gs" --include "src/integration/**/*.gs" --include src/Util.gs
+java -jar gslint.jar --include "src/main/**/*.gs" --include "src/integration/**/*.gs" --include src/Util.gs --init-src-root src
 
 java -jar gslint.jar --include "/c/tmp/src/com.example/**/*.gs" --src-root /c/tmp/src
 ```
@@ -177,32 +179,65 @@ physically contains the classes and therefore who is responsible for the notices
 
 ```bash
 # Run only specific rules
-java -jar gslint.jar --include src --rules empty-catch,dead-assignment
+java -jar gslint.jar --include src --rules empty-catch,dead-assignment --init-src-root src
 
 # Run all rules except the listed ones
-java -jar gslint.jar --include src --skip-rules complexity
+java -jar gslint.jar --include src --skip-rules complex-boolean --init-src-root src
 
 # Mix built-in and custom rules
-java -jar gslint.jar --include src --rules "empty-catch,com.example.MyRule,dead-assignment"
+java -jar gslint.jar --include src --rules "empty-catch,com.example.MyRule,dead-assignment" --init-src-root src
 ```
 
 ### Output formats
 
 ```bash
 # Default text output
-java -jar gslint.jar --include src
+java -jar gslint.jar --include src --init-src-root src
 
 # JSON - suitable for CI result parsing
-java -jar gslint.jar --include src --format json
+java -jar gslint.jar --include src --format json --init-src-root src
 
 # SARIF - for GitHub Code Scanning, VS Code, and other SARIF consumers
-java -jar gslint.jar --include src --format sarif
+java -jar gslint.jar --include src --format sarif --init-src-root src
 
 # Markdown - a PR-summary comment for GitHub or Bitbucket
-java -jar gslint.jar --include src --format markdown > out.md
+java -jar gslint.jar --include src --format markdown --init-src-root src > out.md
 ```
 
 The linter's output goes to `stdout`, so pipe it into a file (`... > report.txt`) or into another processor such as `jq` when you need structured filtering or CI artifact capture.
+
+### Using gslint in a pipeline
+
+Exit code `0` means the analysis completed, and **findings alone never fail the run**. Exit code `1` means gslint could not do its job: invalid arguments, source the compiler rejects, or an opt-in gate you enabled (`--fail-on-parse-error`, `--fail-on-unresolved`, `--max-unresolved`, `--max-unresolved-pct`, `--fail-on-member-error`) tripped, or a custom hook aborted the run (the JSON then carries `"aborted": true` and an `abortReason`).
+
+So check the exit code first, so a broken analysis is never mistaken for a clean one, and only then apply your own policy to the JSON. For example, to abort the pipeline when any violation is reported, or when a rule crashed or a file failed to parse:
+
+```bash
+java -jar gslint.jar --include src --init-src-root src --format json > report.json || exit 1   # analysis failure
+jq -e '([.files[].violations[]] | length) == 0 and (.parseErrors | length) == 0 and (.ruleErrors | length) == 0' report.json > /dev/null \
+  || { echo "gslint reported findings or errors"; exit 1; }
+```
+
+`jq -e` exits nonzero when its result is `false`, which is what stops the pipeline.
+
+A shorter version that only cares about violations:
+
+```bash
+jq -e '[.files[].violations[]] | length == 0' report.json > /dev/null || exit 1
+```
+
+More selective policies, using the same `report.json`:
+
+```bash
+# Fail only on selected rules or on a severity (set severities with --rule-config, see below)
+jq -e '[.files[].violations[] | select(.rule == "empty-catch" or .severity == "critical")] | length == 0' report.json > /dev/null || exit 1
+
+# Allow a violation budget: fail only when there are more than 25 violations
+jq -e '[.files[].violations[]] | length <= 25' report.json > /dev/null || exit 1
+
+# Inspect unresolved types (most-referenced first); the key is absent when everything resolved
+jq '.lintSummary.unresolvedTypes // {}' report.json
+```
 
 ### Progress tracking
 
@@ -210,10 +245,10 @@ For long-running analyses, many sub-commands support `--show-progress` to track 
 
 ```bash
 # Enable progress output (useful for CI and interactive runs)
-java -jar gslint.jar --include src --show-progress
+java -jar gslint.jar --include src --show-progress --init-src-root src
 
 # Combine with JSON output - progress goes to stderr, JSON to stdout
-java -jar gslint.jar --include src --format json --show-progress > report.json
+java -jar gslint.jar --include src --format json --show-progress --init-src-root src > report.json
 ```
 
 Progress output is sent to `stderr` so it does not interfere with structured output (`--format json` or `--format sarif`) piped to `stdout`.
@@ -222,25 +257,25 @@ Progress output is sent to `stderr` so it does not interfere with structured out
 
 ```bash
 # Single rule
-java -jar gslint.jar --include src --rule-config complexity:maxComplexity=8
+java -jar gslint.jar --include src --rule-config too-many-args:maxArgs=4 --init-src-root src
 
 # Multiple rules: semicolons separate rules, commas separate key=value pairs
-java -jar gslint.jar --include src \
+java -jar gslint.jar --include src --init-src-root src \
   --rule-config "empty-catch:allowCommentedCatch=true;too-many-args:maxArgs=4;too-many-returns:maxReturns=4"
 
 # Multiple --rule-config flags (equivalent to the semicolon form)
-java -jar gslint.jar --include src \
+java -jar gslint.jar --include src --init-src-root src \
   --rule-config complex-boolean:maxOperators=2 \
   --rule-config empty-catch:allowCommentedCatch=true
   
 # Single rule with --skip-rules (other rules still run)
-java -jar gslint.jar --include src --skip-rules "complex*"
+java -jar gslint.jar --include src --skip-rules "complex*" --init-src-root src
 ```
 
 ### Rule configuration via properties file
 
 ```bash
-cat <<'EOF' > /tmp/lint.properties
+cat <<'EOF' > lint.properties
 # this is a comment
 rule.empty-catch.allowCommentedCatch=true
 rule.too-many-args.maxArgs=4
@@ -249,7 +284,7 @@ rule.complex-boolean.maxOperators=2
 rule.excessive-newlines.maxBlankLines=2
 rule.too-many-throws.maxThrows=2
 EOF
-java -jar gslint.jar --src-root src --config lint.properties
+java -jar gslint.jar --include src --init-src-root src --config lint.properties
 ```
 
 ### Custom severity
@@ -290,7 +325,7 @@ skip-rules=print-statement,manifold*
 ```
 
 ```bash
-java -jar gslint.jar --config lint.properties
+java -jar gslint.jar --include src --init-src-root src --config lint.properties
 ```
 
 Severity is surfaced in all three output formats:
@@ -314,7 +349,7 @@ libs/jackson-databind-0.0.0.jar
 libs/jackson-core-0.0.0.jar
 libs/jackson-annotations-0.0.0.jar
 EOF
-java -jar gslint.jar --additional-jars-file /tmp/dependencies.txt
+java -jar gslint.jar --include src --init-src-root src --additional-jars-file /tmp/dependencies.txt
 ```
 
 ```bash
@@ -325,7 +360,7 @@ libs/jackson-core-0.0.0.jar
 libs/jackson-annotations-0.0.0.jar
 // this is a comment too
 EOF
-java -jar gslint.jar --include src/ --additional-jars-file /tmp/dependencies.txt
+java -jar gslint.jar --include src/ --init-src-root src --additional-jars-file /tmp/dependencies.txt
 ```
 
 ### All flags
@@ -342,16 +377,56 @@ java -jar gslint.jar --include src/ --additional-jars-file /tmp/dependencies.txt
 | `--format <fmt>` | Output format: `text`, `json`, `sarif`, `intellij` (alias `idea`), `markdown` (alias `md`) | `text` |
 | `--init-src-root <path>` | Source root for Gosu runtime/type resolution. Required to properly resolve types and package structures. Can be specified multiple times for multiple roots. | - |
 | `--additional-jars-file <file>` | JAR paths for type resolution (one per line or semicolon-separated) | - |
-| `--include-generated` | Analyze `@Generated` classes (skipped by default) | `false` |
+| `--include-generated` | Analyze generated code too: turns off the `@Generated`, `--skip-path-patterns` and `--generated-markers` filtering | `false` |
+| `--skip-path-patterns <globs>` | Skip files whose path relative to the source root matches a glob (e.g. `generated/**,**/gen/**`) | - |
+| `--generated-markers <text,...>` | Treat files whose header contains any of these strings (case-insensitive) as generated and skip them | - |
+| `--generated-marker-scan-lines <n>` | How many header lines to scan for `--generated-markers` | `25` |
+| `--write-baseline <file>` | Record every finding from this run in a baseline file | - |
+| `--baseline <file>` | Suppress findings already recorded in the baseline file | - |
+| `--prune-baseline <file>` | Remove baseline entries that no longer occur in the current scan | - |
+| `--baseline-name <label>` | Label stored in the baseline file written by `--write-baseline` | - |
 | `--show-progress` | Print progress every ~10% of files and a final summary | `false` |
 | `--log-level <level>` | Logger level: `SEVERE`, `WARNING`, `INFO`, `FINE`, `FINER`, `FINEST` | `INFO` |
 | `--help` | Print usage and exit | - |
+
+## Troubleshooting and Noise Control
+
+**Findings say `type-incomplete`, or type-dependent rules seem silent.** Gosu could not resolve some types, usually because a dependency JAR is missing. Run [`diagnose`](COMMANDS.md#diagnose) with the types you care about; an `[!!]` line means that type is unresolved in a real run. Then supply the JARs that provide it with [`--additional-jars-file`](#providing-dependency-jars---additional-jars-file-strongly-recommended) and rerun.
+
+```bash
+java -jar gslint.jar diagnose --init-src-root src --type com.example.Missing
+```
+
+**Generated code is producing findings.** Classes annotated `@Generated` are skipped by default. For generators that do not add that annotation, skip by path or by a header marker:
+
+```bash
+# Skip by path. Globs match the path relative to the source root, and "**/" needs at least one
+# directory above the match, so use "generated/**" for a top-level folder and "**/generated/**" for nested ones.
+java -jar gslint.jar --include src --init-src-root src --skip-path-patterns "generated/**,**/generated/**"
+
+# Skip files whose first lines (default 25) contain any marker, case-insensitive
+java -jar gslint.jar --include src --init-src-root src --generated-markers "DO NOT EDIT,auto-generated"
+```
+
+`--include-generated` turns all of this filtering off.
+
+**Adopting gslint on an existing codebase.** A baseline records today's findings so a run reports only new ones:
+
+```bash
+java -jar gslint.jar --include src --init-src-root src --write-baseline baseline.json   # record
+java -jar gslint.jar --include src --init-src-root src --baseline baseline.json         # report only new findings
+java -jar gslint.jar --include src --init-src-root src --prune-baseline baseline.json   # drop entries that no longer occur
+```
+
+Check `baseline.json` into version control. `--baseline-name` adds a label (for example `release-3.1`) to the file. `--baseline`, `--write-baseline` and `--prune-baseline` are mutually exclusive.
 
 ## Extending with Custom Rules
 
 If you work on a platform built using Gosu and need additional rules you can write those rules yourself and load them alongside the built-in ones.
 
 Add `gslint.jar` to your compile classpath, extend `BaseRule<V extends Violation>`, annotate the class with `@RuleToken`, and package your rules into a separate JAR.
+
+For a complete worked example (Java source, build, packaging, and the command that loads it), see [CUSTOM-RULES.md](CUSTOM-RULES.md).
 
 The runner distinguishes built-in tokens from custom class names by the presence of a `.` - anything containing a `.` is treated as a fully-qualified class name and loaded via reflection.
 

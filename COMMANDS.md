@@ -48,6 +48,17 @@ Output is one `outlines` entry per file (trimmed here; real entries also carry h
 }
 ```
 
+### `doctags`
+Extracts structured tags such as `@issue` or `@requirements` from doc comments. Any tag name is extracted (gslint gives none a meaning); `--tag` only filters. Output is JSON by default; `--format csv|text|md` and `--output format:path` write other formats, and a `DocTagsHook` can enrich or reshape the records.
+
+```
+java -jar gslint.jar doctags --include src/test --init-src-root src/main --init-src-root src/test --tag issue,requirements --only-tagged --format csv
+```
+
+`--split-values requirement` adds a `values` array that splits a tag on whitespace, `,` and `;`; add `--value-pattern '[A-Z]+-\d+'` to take the regex matches instead, so `@requirement ABC-123: see ABC-456` gives `["ABC-123", "ABC-456"]`.
+
+Select test classes with `--include` on the test source root; there is no test filter. Each record lists the annotation names written on it (`annotations`, for example `Test`), so tests and tagged helpers can be told apart downstream. An empty result exits 0; add `--fail-if-empty` in CI to exit 1 when no tag was found (a mistyped `--tag`, a wrong `--include`), and `--skip-generated` to leave out files marked `@Generated` or `DO NOT EDIT`. A file with a definite compiler error exits 1 with its file, line and message on stderr.
+
 ### `duplicate`
 A two-phase, cross-file, whole-corpus clone detector - answers "where is this function body copy-pasted elsewhere in the codebase," not "is this specific construct a code smell" (that's what `lint`'s duplication-pattern rules, e.g. `duplicate-branch-code`, are for). Supports three detection algorithms (`hash`/`winnow`/`vector`).
 

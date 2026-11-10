@@ -9,6 +9,7 @@
 
 | Token | Detects |
 |-------|---------|
+| `closed-resource-return` | Flags a function that returns the resource declared by its own using block, so the caller receives it already closed. |
 | `ctor-delegation-param` | Flags constructor parameters not forwarded in explicit 'this(...)' delegation calls. |
 | `dead-assignment` | Flags variables assigned but never read before being overwritten or going out of scope. |
 | `dead-null-check` | Flags a null check on a variable that is already provably non-null - just constructed, or already guarded by an earlier early-return check. |
@@ -18,6 +19,55 @@
 | `unused-ctor-params` | Flags constructor parameters that are never read. |
 | `unused-private-member` | Flags private fields and functions that are never referenced within their top-level class. |
 
+<details>
+<summary>closed-resource-return examples</summary>
+
+Flags a function that returns the variable its own `using` block declares. The
+`using` statement calls `close()` on the resource when the block ends, and a
+`return` inside the block leaves through that same exit, so the caller receives a
+resource that is already closed. The failure usually shows up later, far from the cause, as a
+"stream closed" error.
+
+```gosu
+// Noncompliant: the reader is closed before the caller can read from it
+function open(path : String) : FileReader {
+  using (var r = new FileReader(path)) {
+    return r
+  }
+}
+
+// Compliant: return a value read from the resource, not the resource itself
+function firstChar(path : String) : int {
+  using (var r = new FileReader(path)) {
+    return r.read()
+  }
+}
+```
+
+What is flagged: a `return` inside the `using` body whose value is the declared
+variable itself, in parentheses or behind reference casts that keep the same object (for
+example `r as Reader`). A cast that converts the value, such as `r as String`, yields
+a different object and is not flagged. Every cast layer is checked on its own.
+
+Not flagged: returning something derived from the resource (`r.read()`); wrappers and
+lazy views over it (`new Foo(r)`, a stream over `r`); the `using (existing)`
+form, which declares no variable; lambdas and anonymous classes that capture and return the
+resource later; and lambdas inside constructors or field initializers, because this rule only
+inspects functions. A `using` inside a lambda is checked, and its finding carries the
+name of the enclosing function.
+
+Only resources whose declared type is an `AutoCloseable` or a Gosu
+`IDisposable` are checked. A lock or `IReentrant` in a `using` is released
+with unlock() or exit(), not close(), so returning it is fine. A resource whose type does not
+resolve is skipped, so a missing dependency makes the rule quieter, never noisier.
+
+Some JDK types have a `close()` that does nothing, so the object stays usable:
+`ByteArrayOutputStream`, `ByteArrayInputStream`, `StringWriter` and
+`CharArrayWriter`. A variable of exactly one of these types is skipped. A subclass is
+still flagged, because it may override `close()`. The check goes by the declared type, so
+a no-op type declared as a wider type (for example `OutputStream`) is still flagged.
+
+</details>
 <details>
 <summary>ctor-delegation-param examples</summary>
 
@@ -526,7 +576,7 @@ and a source of confusion.
 
 Delegates are grouped by the interface's fully-qualified name, not its simple name -
 two distinct interfaces that happen to share a simple name in different packages
-(`com.acme.billing.IFoo` vs. `com.acme.shipping.IFoo`) are not duplicates.
+(`com.example.billing.IFoo` vs. `com.example.shipping.IFoo`) are not duplicates.
 
 A delegate whose interface does not resolve (it is missing from the classpath) is skipped:
 two different missing interfaces look identical to the type system, so they cannot be compared.
@@ -1674,6 +1724,10 @@ if (cond) {
   doC()
 }
 ```
+
+Comments are recognized by the shared comment reader, so a comment line (or a line inside a block
+comment) that begins with a closing brace is never mistaken for the closing brace of the
+`if` body.
 
 </details>
 <details>
@@ -4378,14 +4432,14 @@ Optional:
       (default: both)
 
 ```gosu
-// Noncompliant when only com.acme.config.* is allowed
-package com.acme.feature
+// Noncompliant when only com.example.config.* is allowed
+package com.example.feature
 function loadFlag() : String {
   return System.getenv("FEATURE_FLAG")
 }
 
 // Compliant
-package com.acme.config
+package com.example.config
 function loadFlag() : String {
   return System.getenv("FEATURE_FLAG")
 }
@@ -6132,7 +6186,7 @@ the servlet request and response bodies (`getReader`, `getInputStream`,
 `System.err` and `Console.writer()`. This covers both the method and the property
 spelling (`resp.getWriter()` and `resp.Writer`), and a stream that wraps one of
 these as its first constructor argument. Add your own with
-`--rule-config res00g-not-in-using:extraOwnedSources=com.acme.Pool#borrowConnection`,
+`--rule-config res00g-not-in-using:extraOwnedSources=com.example.Pool#borrowConnection`,
 a comma-separated list of `TypeFqn#member` entries; the receiver may be that type or a
 subtype.
 
