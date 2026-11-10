@@ -273,9 +273,9 @@ Only override the stages you need; the rest are no-ops. Use this wrapper for `li
 
 ### Advanced: parse `argv` yourself and pass the hook directly
 
-If you would rather not append `--lint-hook`, parse `argv` into a `LintArgs` and hand a hook instance to `LintService.execute`. Replace `main` in the class above with:
+If you would rather not append `--lint-hook`, parse `argv` into a `LintArgs` and hand a hook instance to `LintCommand.execute`. Replace `main` in the class above with:
 
-`LintArgs` and `LintService` come from gslint (`org.gslint.cli` and `org.gslint.cmd`), so import them as usual. `JCommander` does not come from gslint or from the standard `com.beust` library: it is the Gosu runtime's shaded copy, in `gw.internal.ext.com.beust.jcommander` and bundled in the gslint uber JAR. Use that package, not `com.beust.jcommander`, which is why the snippet writes it fully qualified.
+`LintArgs` and `LintCommand` come from gslint (`org.gslint.cli` and `org.gslint.cmd`), so import them as usual. `JCommander` does not come from gslint or from the standard `com.beust` library: it is the Gosu runtime's shaded copy, in `gw.internal.ext.com.beust.jcommander` and bundled in the gslint uber JAR. Use that package, not `com.beust.jcommander`, which is why the snippet writes it fully qualified.
 
 ```java
 public static void main(String[] argv) {
@@ -294,9 +294,11 @@ public static void main(String[] argv) {
     }
     // Hook instance passed directly, so no --lint-hook is needed. If argv also has --lint-hook,
     // both hooks run, composed, and yours runs first.
-    System.exit(LintService.execute(args, new Main()));
+    System.exit(LintCommand.execute(args, new Main()));
 }
 ```
+
+`LintCommand.execute` is the command line's own error handling without the `System.exit`: a bad rule name or flag is logged as one `Error:` line and returns `1`, and a rejected source file prints the compiler report and returns `1`. `LintService.execute` is the lower-level call. It reports those same problems by throwing (`IllegalArgumentException`, `IllegalStateException`, `InvalidSourceException`), so a `main` that calls it must catch them or the user sees a stack trace. Use it when you want to handle the errors yourself.
 
 This path skips parts of the normal command line that live inside `org.gslint.Main` and are not public:
 
@@ -304,7 +306,7 @@ This path skips parts of the normal command line that live inside `org.gslint.Ma
 - Sub-command handling. Only `lint` flags are understood, so a leading `lint` word is rejected.
 - The standard logging setup, so log level and format can differ from the normal CLI.
 
-Use the forwarding version above when you want all of that. Use this one when you want full control of the process, for example to call `LintService.execute` from a larger program and keep the exit code.
+Use the forwarding version above when you want all of that. Use this one when you want full control of the process, for example to call `LintCommand.execute` from a larger program and keep the exit code.
 
 ## Where to go next
 
